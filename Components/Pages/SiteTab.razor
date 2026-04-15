@@ -30,14 +30,14 @@
         <div class="ms-auto">
             <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="parallelSwitch"
-                       @bind:get="_useParallelSearch" @bind:set="OnParallelChanged"
+                       @bind="ConcreteMonitoringService.UseParallelSearch"
                        disabled="@(state?.IsMonitoring == true)">
                     <label class="form-check-label" for="parallelSwitch">Parallel search (Chaturbate only)</label>
                 </div>
                 <div class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" id="torSwitch"
-                           @bind:get="_useTor" @bind:set="OnTorChanged"
-                           disabled="@(!_useParallelSearch || state?.IsMonitoring == true)">
+                           @bind="ConcreteMonitoringService.UseTor"
+                           disabled="@(!ConcreteMonitoringService.UseParallelSearch || state?.IsMonitoring == true)">
                         <label class="form-check-label" for="torSwitch">Use Tor proxy</label>
                     </div>
                 </div>
@@ -235,9 +235,6 @@
 
     private List<SearchResult> displayResults => isViewingFiltered ? filteredResults : (state?.Results ?? new());
 
-    private bool _useParallelSearch;
-    private bool _useTor;
-
     // ----------------------------------------------------------------------
     // Timestamp formatting with UTC offset
     // ----------------------------------------------------------------------
@@ -263,14 +260,13 @@
     protected override void OnInitialized()
     {
         base.OnInitialized();
+        Debug.WriteLine($"SiteTab: ConcreteMonitoringService hash = {ConcreteMonitoringService.GetHashCode()}");
+
         state = MonitoringService.GetState(Site);
         if (state.IntervalMinutes == 0) state.IntervalMinutes = 5;
         localModelName = state.ModelName;
         localIntervalMinutes = state.IntervalMinutes;
         MonitoringService.StateChanged += OnStateChanged;
-
-        _useParallelSearch = ConcreteMonitoringService?.UseParallelSearch ?? false;
-        _useTor = ConcreteMonitoringService?.UseTor ?? false;
     }
 
     private void OnStateChanged(Site changedSite)
@@ -424,31 +420,6 @@
     private void StopMonitoring()
     {
         MonitoringService.StopMonitoring(Site);
-    }
-
-    // ----------------------------------------------------------------------
-    // Parallel toggles
-    // ----------------------------------------------------------------------
-    private void OnParallelChanged(bool value)
-    {
-        _useParallelSearch = value;
-        if (ConcreteMonitoringService != null)
-            ConcreteMonitoringService.UseParallelSearch = value;
-
-        if (!value && ConcreteMonitoringService != null)
-        {
-            _useTor = false;
-            ConcreteMonitoringService.UseTor = false;
-            StateHasChanged();
-        }
-    }
-
-    private void OnTorChanged(bool value)
-    {
-        _useTor = value;
-        if (ConcreteMonitoringService != null)
-            ConcreteMonitoringService.UseTor = value;
-        StateHasChanged();
     }
 
     // ----------------------------------------------------------------------

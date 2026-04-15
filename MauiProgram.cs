@@ -30,8 +30,10 @@ namespace ModelRank
             builder.Services.AddSingleton<CamsodaScraper>();
             builder.Services.AddSingleton<Cam4Scraper>();
             builder.Services.AddSingleton<ISiteScraperFactory, SiteScraperFactory>();
-            builder.Services.AddSingleton<MonitoringService>();   // concrete
-            builder.Services.AddSingleton<IMonitoringService, MonitoringService>(); // interface
+            // Register concrete singleton first
+            builder.Services.AddSingleton<MonitoringService>();
+            // Then register the interface to return the same instance
+            builder.Services.AddSingleton<IMonitoringService>(sp => sp.GetRequiredService<MonitoringService>());
             builder.Services.AddSingleton<IStorageService, JsonStorageService>();
 
 #if DEBUG

@@ -15,7 +15,17 @@ public class MonitoringService : IMonitoringService
     private readonly ConcurrentDictionary<Site, SiteMonitorState> _states = new();
     private readonly ConcurrentDictionary<Site, SemaphoreSlim> _monitoringLocks = new();
 
-    public bool UseParallelSearch { get; set; } = false;
+    private bool _useParallelSearch;
+    public bool UseParallelSearch
+    {
+        get => _useParallelSearch;
+        set
+        {
+            _useParallelSearch = value;
+            Debug.WriteLine($"UseParallelSearch set to {value}");
+        }
+    }
+
     public bool UseTor { get; set; } = false;
 
     public event Action<Site>? StateChanged;
@@ -30,6 +40,8 @@ public class MonitoringService : IMonitoringService
         _storageService = storageService;
         _browserService = browserService;
         _torProxyManager = torProxyManager;
+
+        Debug.WriteLine($"MonitoringService created: {GetHashCode()}");
     }
 
     public SiteMonitorState GetState(Site site) => _states.GetOrAdd(site, _ => new SiteMonitorState());
@@ -142,35 +154,33 @@ public class MonitoringService : IMonitoringService
                     Debug.WriteLine($"[Parallel] Total pages detected: {totalPages}");
                     if (!totalPages.HasValue || totalPages.Value <= 1)
                     {
-                        Debug.WriteLine("[Parallel] Total pages <= 1, falling back to sequential.");
-                        output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
+                        totalPages = 100; // fallback for testing
+                        Debug.WriteLine("[Parallel] Using fallback total pages = 100");
+                    }
+
+                    int segmentSize = 20;
+                    var ranges = Enumerable.Range(1, totalPages.Value)
+                        .Select((x, i) => new { Index = i, Value = x })
+                        .GroupBy(x => x.Index / segmentSize)
+                        .Select(g => (Start: g.First().Value, End: g.Last().Value))
+                        .ToList();
+
+                    Debug.WriteLine($"[Parallel] Created {ranges.Count} ranges: {string.Join(", ", ranges.Select(r => $"{r.Start}-{r.End}"))}");
+
+                    string? proxyUrl = null;
+                    if (UseTor)
+                    {
+                        await _torProxyManager.StartAsync();
+                        proxyUrl = _torProxyManager.GetProxyUrl(0);
+                    }
+
+                    if (scraper is ChaturbateScraper chaturbateScraper2)
+                    {
+                        output = await chaturbateScraper2.ScanPagesInParallelAsync(ranges, state.ModelName, page, proxyUrl, UpdateSegmentStatus, token);
                     }
                     else
                     {
-                        int segmentSize = 20;
-                        var ranges = Enumerable.Range(1, totalPages.Value)
-                            .Select((x, i) => new { Index = i, Value = x })
-                            .GroupBy(x => x.Index / segmentSize)
-                            .Select(g => (Start: g.First().Value, End: g.Last().Value))
-                            .ToList();
-
-                        Debug.WriteLine($"[Parallel] Created {ranges.Count} ranges: {string.Join(", ", ranges.Select(r => $"{r.Start}-{r.End}"))}");
-
-                        string? proxyUrl = null;
-                        if (UseTor)
-                        {
-                            await _torProxyManager.StartAsync();
-                            proxyUrl = _torProxyManager.GetProxyUrl(0);
-                        }
-
-                        if (scraper is ChaturbateScraper chaturbateScraper2)
-                        {
-                            output = await chaturbateScraper2.ScanPagesInParallelAsync(ranges, state.ModelName, page, proxyUrl, UpdateSegmentStatus, token);
-                        }
-                        else
-                        {
-                            output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
-                        }
+                        output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
                     }
                 }
                 else
@@ -204,17 +214,16 @@ public class MonitoringService : IMonitoringService
             }
             catch (OperationCanceledException)
             {
-                if (token.IsCancellationRequested)
-                {
-                    state.StatusMessage = "Monitoring stopped.";
-                    break;
-                }
-                state.StatusMessage = $"Search cancelled. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
+                // User pressed Stop – exit immediately
+                state.StatusMessage = "Monitoring stopped.";
+                break;
             }
-            catch (Exception ex) when (ex.Message.Contains("Target page") || ex.Message.Contains("closed"))
+            catch (Exception ex) when (ex.GetType().Name == "TargetClosedException" || ex.Message.Contains("Target page") || ex.Message.Contains("closed"))
             {
                 if (!token.IsCancellationRequested)
-                    state.StatusMessage = $"Browser error: {ex.Message}. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
+                    state.StatusMessage = $"Browser closed. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
+                else
+                    state.StatusMessage = "Monitoring stopped.";
             }
             catch (Exception ex)
             {
