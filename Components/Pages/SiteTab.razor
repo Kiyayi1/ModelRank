@@ -1,0 +1,484 @@
+﻿@using ModelRank.Services
+@using ModelRank.Models
+@using System.Text.RegularExpressions
+@inject IMonitoringService MonitoringService
+@inject MonitoringService ConcreteMonitoringService
+@inject IStorageService StorageService
+@inject IJSRuntime JSRuntime
+@implements IDisposable
+
+<div class="site-tab">
+    <!-- Compact input row -->
+    <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
+        <div style="min-width:150px;">
+            <label for="@($"modelName-{Site}")" class="form-label small">Model Name</label>
+            <InputText @bind-Value="localModelName" id="@($"modelName-{Site}")" class="form-control form-control-sm"
+                       @onkeypress="OnEnterKey"
+                       disabled="@(state?.IsMonitoring == true)" />
+        </div>
+        <div style="min-width:80px;">
+            <label for="@($"interval-{Site}")" class="form-label small">Interval (min)</label>
+            <InputNumber @bind-Value="localIntervalMinutes" id="@($"interval-{Site}")" class="form-control form-control-sm" min="0.5" step="0.5" disabled="@(state?.IsMonitoring == true)" />
+        </div>
+        <div class="d-flex gap-1">
+            <button class="btn btn-primary btn-sm" @onclick="StartMonitoring" disabled="@(state?.IsMonitoring == true)">Start</button>
+            <button class="btn btn-danger btn-sm" @onclick="StopMonitoring" disabled="@(state?.IsMonitoring != true)">Stop</button>
+            <button class="btn btn-info btn-sm" @onclick="ToggleFilterPanel">Filters</button>
+        </div>
+
+        <!-- toggles -->
+        <div class="ms-auto">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="parallelSwitch"
+                       @bind:get="_useParallelSearch" @bind:set="OnParallelChanged"
+                       disabled="@(state?.IsMonitoring == true)">
+                    <label class="form-check-label" for="parallelSwitch">Parallel search (Chaturbate only)</label>
+                </div>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="torSwitch"
+                           @bind:get="_useTor" @bind:set="OnTorChanged"
+                           disabled="@(!_useParallelSearch || state?.IsMonitoring == true)">
+                        <label class="form-check-label" for="torSwitch">Use Tor proxy</label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Collapsible filter panel -->
+            @if (showFilterPanel)
+            {
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap align-items-end gap-2">
+                            <div style="min-width:200px;">
+                                <label class="form-label small">Select Model</label>
+                                <select @onchange="OnFilterModelChanged" class="form-select form-select-sm">
+                                    <option value="">Choose a model</option>
+                                    @foreach (var m in filterModels)
+                                    {
+                                        <option value="@m" selected="@(selectedFilterModel == m)">@m</option>
+                                    }
+                                </select>
+                            </div>
+                            <div style="min-width:150px;">
+                                <label class="form-label small">From</label>
+                                <input type="datetime-local" @bind="filterStart" class="form-control form-control-sm" />
+                            </div>
+                            <div style="min-width:150px;">
+                                <label class="form-label small">To</label>
+                                <input type="datetime-local" @bind="filterEnd" class="form-control form-control-sm" />
+                            </div>
+                            <div>
+                                <button class="btn btn-secondary btn-sm me-1" @onclick="ApplyFilter">Apply</button>
+                                <button class="btn btn-outline-secondary btn-sm me-1" @onclick="ClearFilter">Clear</button>
+                                @if (filteredResults.Any())
+                                {
+                                    <button class="btn btn-danger btn-sm" @onclick="DeleteAllFiltered">Delete All</button>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            <!-- Status message -->
+            @if (!string.IsNullOrEmpty(state?.StatusMessage))
+            {
+                <div class="alert alert-info mt-2 status-area">
+                    <pre class="status-text">@state.StatusMessage</pre>
+                </div>
+            }
+
+            <!-- Live monitoring results table -->
+            @if (!isViewingFiltered && state?.Results.Any() == true)
+            {
+                <h4 class="mt-4">
+                    @{
+                        var latestResult = state.Results.LastOrDefault();
+                        string displayName;
+                        if (latestResult != null && !string.IsNullOrEmpty(latestResult.DisplayName) && !string.Equals(latestResult.ModelName, latestResult.DisplayName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            displayName = latestResult.DisplayName;
+                        }
+                        else
+                        {
+                            displayName = FormatDisplayName(state.ModelName);
+                        }
+
+                        if (!string.IsNullOrEmpty(displayName) && !string.Equals(state.ModelName, displayName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            <span>Live Monitoring: @state.ModelName (@displayName)</span>
+                        }
+                        else
+                        {
+                            <span>Live Monitoring: @state.ModelName</span>
+                        }
+                    }
+                </h4>
+                <table class="table table-sm table-striped">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Page</th>
+                            <th>Position</th>
+                            <th>Rank</th>
+                            <th>Viewers</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in state.Results.OrderByDescending(r => r.Timestamp))
+                        {
+                            <tr>
+                                <td>@FormatTimestamp(item.Timestamp)</td>
+                                <td>@item.Page</td>
+                                <td>@item.Position</td>
+                                <td>
+                                    @item.Rank
+                                    @if (item.RankChange.HasValue && item.RankChange != 0)
+                                    {
+                                        <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
+                                            @(item.RankChange > 0 ? "▲" : "▼")
+                                        </span>
+                                    }
+                                </td>
+                                <td>
+                                    @item.Viewers
+                                    @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
+                                    {
+                                        <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
+                                            @(item.ViewersChange > 0 ? "▲" : "▼")
+                                        </span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+            <!-- Filtered results table (with delete buttons) -->
+            @if (isViewingFiltered && filteredResults.Any())
+            {
+                <h4 class="mt-4">
+                    @{
+                        var firstResult = filteredResults.FirstOrDefault();
+                        if (firstResult != null && !string.IsNullOrEmpty(firstResult.DisplayName) && !string.Equals(firstResult.ModelName, firstResult.DisplayName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            <span>Filtered Results for @selectedFilterModel (@firstResult.DisplayName)</span>
+                        }
+                        else
+                        {
+                            <span>Filtered Results for @selectedFilterModel</span>
+                        }
+                    }
+                </h4>
+                <table class="table table-sm table-striped">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Page</th>
+                            <th>Position</th>
+                            <th>Rank</th>
+                            <th>Viewers</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in filteredResults.OrderByDescending(r => r.Timestamp))
+                        {
+                            <tr>
+                                <td>@FormatFullTimestamp(item.Timestamp)</td>
+                                <td>@item.Page</td>
+                                <td>@item.Position</td>
+                                <td>
+                                    @item.Rank
+                                    @if (item.RankChange.HasValue && item.RankChange != 0)
+                                    {
+                                        <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
+                                            @(item.RankChange > 0 ? "▲" : "▼")
+                                        </span>
+                                    }
+                                </td>
+                                <td>
+                                    @item.Viewers
+                                    @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
+                                    {
+                                        <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
+                                            @(item.ViewersChange > 0 ? "▲" : "▼")
+                                        </span>
+                                    }
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteResult(item.Id)" title="Delete this entry">🗑️</button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+
+@code {
+    [Parameter] public Site Site { get; set; }
+
+    private string localModelName = "";
+    private double localIntervalMinutes = 5;
+    private SiteMonitorState? state;
+
+    // Filter panel
+    private bool showFilterPanel = false;
+    private List<string> filterModels = new();
+    private string selectedFilterModel = "";
+    private DateTime filterStart = DateTime.Today;
+    private DateTime filterEnd = DateTime.Today.AddDays(1).AddSeconds(-1);
+    private List<SearchResult> filteredResults = new();
+    private bool isViewingFiltered = false;
+
+    private List<SearchResult> displayResults => isViewingFiltered ? filteredResults : (state?.Results ?? new());
+
+    private bool _useParallelSearch;
+    private bool _useTor;
+
+    // ----------------------------------------------------------------------
+    // Timestamp formatting with UTC offset
+    // ----------------------------------------------------------------------
+    private string FormatTimestamp(DateTime timestamp)
+    {
+        var offset = TimeZoneInfo.Local.GetUtcOffset(timestamp);
+        string offsetStr = offset.Hours >= 0 ? $"+{offset.Hours}" : $"{offset.Hours}";
+        if (offset.Minutes != 0) offsetStr += $":{offset.Minutes:D2}";
+        return $"{timestamp:HH:mm:ss} (UTC{offsetStr})";
+    }
+
+    private string FormatFullTimestamp(DateTime timestamp)
+    {
+        var offset = TimeZoneInfo.Local.GetUtcOffset(timestamp);
+        string offsetStr = offset.Hours >= 0 ? $"+{offset.Hours}" : $"{offset.Hours}";
+        if (offset.Minutes != 0) offsetStr += $":{offset.Minutes:D2}";
+        return $"{timestamp:yyyy-MM-dd HH:mm:ss} (UTC{offsetStr})";
+    }
+
+    // ----------------------------------------------------------------------
+    // Lifecycle and state
+    // ----------------------------------------------------------------------
+    protected override void OnInitialized()
+    {
+        base.OnInitialized();
+        state = MonitoringService.GetState(Site);
+        if (state.IntervalMinutes == 0) state.IntervalMinutes = 5;
+        localModelName = state.ModelName;
+        localIntervalMinutes = state.IntervalMinutes;
+        MonitoringService.StateChanged += OnStateChanged;
+
+        _useParallelSearch = ConcreteMonitoringService?.UseParallelSearch ?? false;
+        _useTor = ConcreteMonitoringService?.UseTor ?? false;
+    }
+
+    private void OnStateChanged(Site changedSite)
+    {
+        if (changedSite == Site)
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadFilterModels();
+    }
+
+    private async Task LoadFilterModels()
+    {
+        filterModels = await StorageService.GetDistinctModelNamesAsync(Site);
+    }
+
+    // ----------------------------------------------------------------------
+    // Filter panel handlers
+    // ----------------------------------------------------------------------
+    private void ToggleFilterPanel()
+    {
+        showFilterPanel = !showFilterPanel;
+        if (showFilterPanel)
+        {
+            _ = LoadFilterModels();
+        }
+    }
+
+    private async Task OnFilterModelChanged(ChangeEventArgs e)
+    {
+        selectedFilterModel = e.Value?.ToString() ?? "";
+        if (!string.IsNullOrEmpty(selectedFilterModel))
+        {
+            var (min, max) = await StorageService.GetTimeRangeForModelAsync(Site, selectedFilterModel);
+            filterStart = min;
+            filterEnd = max;
+        }
+        else
+        {
+            filteredResults.Clear();
+            isViewingFiltered = false;
+        }
+        StateHasChanged();
+    }
+
+    private async Task ApplyFilter()
+    {
+        if (string.IsNullOrEmpty(selectedFilterModel)) return;
+        var rawResults = await StorageService.GetResultsForModelAsync(Site, selectedFilterModel, filterStart, filterEnd);
+        filteredResults = ComputeTrends(rawResults);
+        isViewingFiltered = true;
+        showFilterPanel = false;
+        StateHasChanged();
+    }
+
+    private void ClearFilter()
+    {
+        selectedFilterModel = "";
+        filteredResults.Clear();
+        isViewingFiltered = false;
+        showFilterPanel = false;
+        StateHasChanged();
+    }
+
+    private async Task DeleteResult(int id)
+    {
+        await StorageService.DeleteResultAsync(id);
+        if (isViewingFiltered && !string.IsNullOrEmpty(selectedFilterModel))
+        {
+            await ApplyFilter();
+        }
+    }
+
+    private async Task DeleteAllFiltered()
+    {
+        var confirmed = await JSRuntime.InvokeAsync<bool>("confirm", "Are you sure you want to delete all filtered results?");
+        if (!confirmed) return;
+
+        var ids = filteredResults.Select(r => r.Id).ToList();
+        await StorageService.DeleteResultsAsync(ids);
+        filteredResults.Clear();
+        isViewingFiltered = false;
+        StateHasChanged();
+    }
+
+    // ----------------------------------------------------------------------
+    // Trend computation
+    // ----------------------------------------------------------------------
+    private List<SearchResult> ComputeTrends(List<SearchResult> raw)
+    {
+        var sorted = raw.OrderBy(r => r.Timestamp).ToList();
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            if (i > 0)
+            {
+                var prev = sorted[i - 1];
+                sorted[i].PageChange = sorted[i].Page - prev.Page;
+                sorted[i].PositionChange = sorted[i].Position - prev.Position;
+                sorted[i].RankChange = prev.Rank - sorted[i].Rank; // positive = improvement
+                sorted[i].ViewersChange = ParseViewers(sorted[i].Viewers) - ParseViewers(prev.Viewers);
+            }
+            else
+            {
+                sorted[i].PageChange = null;
+                sorted[i].PositionChange = null;
+                sorted[i].RankChange = null;
+                sorted[i].ViewersChange = null;
+            }
+        }
+        return sorted;
+    }
+
+    private string FormatDisplayName(string? username)
+    {
+        if (string.IsNullOrEmpty(username)) return "";
+        string display = Regex.Replace(username, @"([a-z])([A-Z])", "$1 $2");
+        if (display.Length > 0)
+            display = char.ToUpper(display[0]) + display[1..];
+        return display;
+    }
+
+    // ----------------------------------------------------------------------
+    // Monitoring control
+    // ----------------------------------------------------------------------
+    private async Task OnEnterKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await StartMonitoring();
+        }
+    }
+
+    private async Task StartMonitoring()
+    {
+        if (string.IsNullOrWhiteSpace(localModelName)) return;
+        if (localIntervalMinutes < 0.5) localIntervalMinutes = 0.5;
+
+        if (state?.IsMonitoring == true)
+        {
+            StopMonitoring();
+            await Task.Delay(500);
+        }
+
+        await MonitoringService.StartMonitoringAsync(Site, localModelName, localIntervalMinutes);
+    }
+
+    private void StopMonitoring()
+    {
+        MonitoringService.StopMonitoring(Site);
+    }
+
+    // ----------------------------------------------------------------------
+    // Parallel toggles
+    // ----------------------------------------------------------------------
+    private void OnParallelChanged(bool value)
+    {
+        _useParallelSearch = value;
+        if (ConcreteMonitoringService != null)
+            ConcreteMonitoringService.UseParallelSearch = value;
+
+        if (!value && ConcreteMonitoringService != null)
+        {
+            _useTor = false;
+            ConcreteMonitoringService.UseTor = false;
+            StateHasChanged();
+        }
+    }
+
+    private void OnTorChanged(bool value)
+    {
+        _useTor = value;
+        if (ConcreteMonitoringService != null)
+            ConcreteMonitoringService.UseTor = value;
+        StateHasChanged();
+    }
+
+    // ----------------------------------------------------------------------
+    // Helper: parse viewers from string
+    // ----------------------------------------------------------------------
+    private int ParseViewers(string viewersText)
+    {
+        viewersText = viewersText.ToLower().Replace(",", "").Trim();
+        double multiplier = 1;
+        if (viewersText.EndsWith("k"))
+        {
+            multiplier = 1000;
+            viewersText = viewersText[..^1];
+        }
+        else if (viewersText.EndsWith("m"))
+        {
+            multiplier = 1000000;
+            viewersText = viewersText[..^1];
+        }
+
+        if (double.TryParse(viewersText, out double val))
+            return (int)(val * multiplier);
+        return 0;
+    }
+
+    // ----------------------------------------------------------------------
+    // IDisposable implementation
+    // ----------------------------------------------------------------------
+    public void Dispose()
+    {
+        MonitoringService.StateChanged -= OnStateChanged;
+    }
+}

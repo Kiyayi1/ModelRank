@@ -1,0 +1,39 @@
+﻿@page "/"
+
+<h1>Model Rank Monitor</h1>
+
+<ul class="nav nav-tabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(activeSite == Site.Chaturbate ? "active" : "")" @onclick="() => SetActiveSite(Site.Chaturbate)" type="button">Chaturbate</button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(activeSite == Site.Camsoda ? "active" : "")" @onclick="() => SetActiveSite(Site.Camsoda)" type="button">Camsoda</button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link @(activeSite == Site.Cam4 ? "active" : "")" @onclick="() => SetActiveSite(Site.Cam4)" type="button">Cam4</button>
+    </li>
+</ul>
+
+<div class="tab-content mt-3">
+    @if (activeSite == Site.Chaturbate)
+    {
+        <SiteTab Site="Site.Chaturbate" />
+    }
+    else if (activeSite == Site.Camsoda)
+    {
+        <SiteTab Site="Site.Camsoda" />
+    }
+    else if (activeSite == Site.Cam4)
+    {
+        <SiteTab Site="Site.Cam4" />
+    }
+</div>
+
+@code {
+    private Site activeSite = Site.Chaturbate;
+
+    private void SetActiveSite(Site site)
+    {
+        activeSite = site;
+    }
+}
