@@ -25,7 +25,6 @@ namespace ModelRank
             builder.Services.AddMauiBlazorWebView();
             // Register the scraping service as scoped (or singleton)
             builder.Services.AddSingleton<IBrowserService, BrowserService>();
-            builder.Services.AddSingleton<TorProxyManager>();
             builder.Services.AddSingleton<ChaturbateScraper>();
             builder.Services.AddSingleton<CamsodaScraper>();
             builder.Services.AddSingleton<Cam4Scraper>();

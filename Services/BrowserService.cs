@@ -26,30 +26,29 @@ public class BrowserService : IBrowserService
 
     public async Task<IPage> GetOrCreatePageAsync(Site site, IProgress<string>? progress = null)
     {
+        // If we already have a page for this site and it's still usable, return it
         if (_pages.TryGetValue(site, out var existingPage) && existingPage != null && !existingPage.IsClosed)
             return existingPage;
 
         await _initLock.WaitAsync();
         try
         {
+            // Double-check after lock
             if (_pages.TryGetValue(site, out existingPage) && existingPage != null && !existingPage.IsClosed)
                 return existingPage;
 
+            // Ensure browsers are installed (first run only)
             await PlaywrightInstaller.EnsureBrowsersInstalledAsync(progress);
 
             if (_playwright == null)
             {
                 _playwright = await Playwright.CreateAsync();
 
-                // Use Firefox instead of Chromium – often better at headless evasion
+                // Launch Firefox (headless mode controlled by const)
                 _browser = await _playwright.Firefox.LaunchAsync(new BrowserTypeLaunchOptions
                 {
-                    Headless = Headless,
-                    Args = new[]
-                    {
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox"
-                    }
+                    Headless = Headless,  // true for production, false for debugging
+                    Args = new[] { "--no-sandbox" }
                 });
 
                 _context = await _browser.NewContextAsync(new BrowserNewContextOptions
@@ -61,12 +60,12 @@ public class BrowserService : IBrowserService
                     ScreenSize = new ScreenSize { Width = 1920, Height = 1080 }
                 });
 
-                // Stealth script (Firefox compatible)
+                // Stealth script for Firefox (overrides navigator.webdriver, etc.)
                 await _context.AddInitScriptAsync(@"() => {
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                }");
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            }");
             }
 
             var page = await _context!.NewPageAsync();

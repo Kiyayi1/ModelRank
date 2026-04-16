@@ -11,37 +11,19 @@ public class MonitoringService : IMonitoringService
     private readonly ISiteScraperFactory _scraperFactory;
     private readonly IStorageService _storageService;
     private readonly IBrowserService _browserService;
-    private readonly TorProxyManager _torProxyManager;
     private readonly ConcurrentDictionary<Site, SiteMonitorState> _states = new();
     private readonly ConcurrentDictionary<Site, SemaphoreSlim> _monitoringLocks = new();
-
-    private bool _useParallelSearch;
-    public bool UseParallelSearch
-    {
-        get => _useParallelSearch;
-        set
-        {
-            _useParallelSearch = value;
-            Debug.WriteLine($"UseParallelSearch set to {value}");
-        }
-    }
-
-    public bool UseTor { get; set; } = false;
 
     public event Action<Site>? StateChanged;
 
     public MonitoringService(
         ISiteScraperFactory scraperFactory,
         IStorageService storageService,
-        IBrowserService browserService,
-        TorProxyManager torProxyManager)
+        IBrowserService browserService)
     {
         _scraperFactory = scraperFactory;
         _storageService = storageService;
         _browserService = browserService;
-        _torProxyManager = torProxyManager;
-
-        Debug.WriteLine($"MonitoringService created: {GetHashCode()}");
     }
 
     public SiteMonitorState GetState(Site site) => _states.GetOrAdd(site, _ => new SiteMonitorState());
@@ -118,9 +100,6 @@ public class MonitoringService : IMonitoringService
             }
         });
 
-        bool useParallel = UseParallelSearch && site == Site.Chaturbate;
-        Debug.WriteLine($"[Parallel] useParallel = {useParallel} (UseParallelSearch={UseParallelSearch}, site={site})");
-
         while (!token.IsCancellationRequested)
         {
             state.IsSearching = true;
@@ -130,65 +109,9 @@ public class MonitoringService : IMonitoringService
 
             try
             {
-                List<string> output;
-                if (useParallel)
-                {
-                    Debug.WriteLine("[Parallel] Entering parallel branch.");
-                    var segmentStatuses = new ConcurrentDictionary<int, string>();
-                    void UpdateSegmentStatus(int segmentIndex, string message)
-                    {
-                        segmentStatuses[segmentIndex] = message;
-                        var combined = string.Join("\n", segmentStatuses.OrderBy(kv => kv.Key)
-                            .Select(kv => $"[Segment {kv.Key}] {kv.Value}"));
-                        state.StatusMessage = combined;
-                        StateChanged?.Invoke(site);
-                        Debug.WriteLine($"[Parallel] Segment {segmentIndex}: {message}");
-                    }
-
-                    if (scraper is ChaturbateScraper chaturbateScraper)
-                    {
-                        await chaturbateScraper.EnsureConsentAsync(page, token);
-                    }
-
-                    int? totalPages = await GetTotalPagesAsync(page);
-                    Debug.WriteLine($"[Parallel] Total pages detected: {totalPages}");
-                    if (!totalPages.HasValue || totalPages.Value <= 1)
-                    {
-                        totalPages = 100; // fallback for testing
-                        Debug.WriteLine("[Parallel] Using fallback total pages = 100");
-                    }
-
-                    int segmentSize = 20;
-                    var ranges = Enumerable.Range(1, totalPages.Value)
-                        .Select((x, i) => new { Index = i, Value = x })
-                        .GroupBy(x => x.Index / segmentSize)
-                        .Select(g => (Start: g.First().Value, End: g.Last().Value))
-                        .ToList();
-
-                    Debug.WriteLine($"[Parallel] Created {ranges.Count} ranges: {string.Join(", ", ranges.Select(r => $"{r.Start}-{r.End}"))}");
-
-                    string? proxyUrl = null;
-                    if (UseTor)
-                    {
-                        await _torProxyManager.StartAsync();
-                        proxyUrl = _torProxyManager.GetProxyUrl(0);
-                    }
-
-                    if (scraper is ChaturbateScraper chaturbateScraper2)
-                    {
-                        output = await chaturbateScraper2.ScanPagesInParallelAsync(ranges, state.ModelName, page, proxyUrl, UpdateSegmentStatus, token);
-                    }
-                    else
-                    {
-                        output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
-                    }
-                }
-                else
-                {
-                    output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
-                }
-
+                var output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
                 var result = ParseResult(output);
+
                 if (result != null)
                 {
                     result.Site = site;
@@ -214,11 +137,14 @@ public class MonitoringService : IMonitoringService
             }
             catch (OperationCanceledException)
             {
-                // User pressed Stop – exit immediately
-                state.StatusMessage = "Monitoring stopped.";
-                break;
+                if (token.IsCancellationRequested)
+                {
+                    state.StatusMessage = "Monitoring stopped.";
+                    break;
+                }
+                state.StatusMessage = $"Search cancelled. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
             }
-            catch (Exception ex) when (ex.GetType().Name == "TargetClosedException" || ex.Message.Contains("Target page") || ex.Message.Contains("closed"))
+            catch (Exception ex) when (ex.GetType().Name == "TargetClosedException")
             {
                 if (!token.IsCancellationRequested)
                     state.StatusMessage = $"Browser closed. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
@@ -252,33 +178,6 @@ public class MonitoringService : IMonitoringService
         state.IsMonitoring = false;
         state.IsSearching = false;
         StateChanged?.Invoke(site);
-    }
-
-    private async Task<int?> GetTotalPagesAsync(IPage page)
-    {
-        try
-        {
-            // Ensure we are on page 1
-            if (!page.Url.Contains("?page=1"))
-                await page.GotoAsync("https://chaturbate.com/?page=1", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-
-            // Get all page number buttons and find the maximum
-            var pageLinks = await page.QuerySelectorAllAsync("a[data-testid='page-number-button']");
-            int maxPage = 0;
-            foreach (var link in pageLinks)
-            {
-                var text = await link.TextContentAsync();
-                if (int.TryParse(text, out int num) && num > maxPage)
-                    maxPage = num;
-            }
-            return maxPage > 0 ? maxPage : null;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[GetTotalPagesAsync] Error: {ex}");
-            return null;
-        }
     }
 
     private string FormatTimeSpan(TimeSpan ts)

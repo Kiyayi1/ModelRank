@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -16,15 +17,26 @@ public class Cam4Scraper : ISiteScraper
     private static readonly HashSet<Site> _consentHandled = new HashSet<Site>();
     private static readonly object _consentLock = new object();
 
+    // Realistic user agents (keep the Windows Chrome one first)
+    private static readonly string[] _userAgents = new[]
+    {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:108.0) Gecko/20100101 Firefox/108.0"
+    };
+
     public async Task<List<string>> FindModelRankAsync(IPage page, string modelName, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         var output = new List<string>();
         UiLog($"Starting new search for '{modelName}' from page 1.", output, progress);
+        Debug.WriteLine($"[Cam4] Starting search for {modelName}");
+
+        page.SetDefaultTimeout(300_000); // 5 minutes
 
         int pageNum = 1;
         bool found = false;
         int globalCount = 0;
-        int? lastPage = null;
+        const int maxRetries = 3;
 
         try
         {
@@ -32,81 +44,220 @@ public class Cam4Scraper : ISiteScraper
             {
                 string url = pageNum == 1 ? "https://www.cam4.com/all" : $"https://www.cam4.com/all/?page={pageNum}";
                 UiLog($"Scanning page {pageNum}...", output, progress);
+                Debug.WriteLine($"[Cam4] Scanning page {pageNum}");
 
-                cancellationToken.ThrowIfCancellationRequested();
+                bool pageProcessed = false;
+                int retryCount = 0;
 
-                bool navigationSuccess = await NavigateWithRetryAsync(page, url, output, progress, cancellationToken);
-                if (!navigationSuccess)
+                while (!pageProcessed && !cancellationToken.IsCancellationRequested && retryCount < maxRetries)
                 {
-                    UiLog($"Failed to load page {pageNum} after retries. Aborting search.", output, progress);
-                    break;
-                }
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                if (pageNum == 1 && !_consentHandled.Contains(Site.Cam4))
-                {
-                    await HandleConsentAsync(page, output, progress, cancellationToken);
-                    lock (_consentLock) _consentHandled.Add(Site.Cam4);
-                }
+                    // Rotate user agent
+                    var userAgent = _userAgents[_random.Next(_userAgents.Length)];
+                    await page.Context.SetExtraHTTPHeadersAsync(new Dictionary<string, string> { { "User-Agent", userAgent } });
+                    Debug.WriteLine($"[Cam4] Using user agent: {userAgent}");
 
-                // Get the last page number from pagination (if not already known)
-                if (!lastPage.HasValue)
-                {
-                    lastPage = await GetLastPageNumberAsync(page);
-                    if (lastPage.HasValue && lastPage.Value > 1)
-                        Debug.WriteLine($"[Cam4] Last page is {lastPage.Value}");
-                }
+                    // Random delay before navigation (2-5 seconds)
+                    await Task.Delay(_random.Next(2000, 5000), cancellationToken);
+                    Debug.WriteLine($"[Cam4] Navigating to {url}");
+                    await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+                    await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                    Debug.WriteLine("[Cam4] DOM ready");
 
-                // Check for redirect (non‑existent page redirects to page 1)
-                int currentPage = ExtractPageNumber(page.Url);
-                if (currentPage != pageNum && pageNum > 1)
-                {
-                    UiLog($"Requested page {pageNum} does not exist – redirected to page {currentPage}. End of listings.", output, progress);
-                    break;
-                }
+                    var title = await page.TitleAsync();
+                    Debug.WriteLine($"[Cam4] Page title: {title}");
 
-                // If we've passed the last page, stop
-                if (lastPage.HasValue && pageNum > lastPage.Value)
-                {
-                    UiLog($"Reached last page ({lastPage.Value}) without finding the model.", output, progress);
-                    break;
-                }
-
-                var (cards, shouldStop) = await ProcessPageAsync(page, pageNum, output, progress, cancellationToken);
-                if (shouldStop)
-                {
-                    UiLog($"End of listings reached at page {pageNum}.", output, progress);
-                    break;
-                }
-
-                if (cards != null && cards.Count > 0)
-                {
-                    found = await SearchCardsAsync(cards, modelName, pageNum, globalCount, output, progress, cancellationToken);
-                    if (!found)
+                    // Detect "Browser Update" message (Cam4's anti‑bot)
+                    var content = await page.ContentAsync();
+                    if (content.Contains("Browser Update") || content.Contains("update your browser") || title.Contains("Browser Update"))
                     {
-                        globalCount += cards.Count;
+                        retryCount++;
+                        int waitSeconds = (int)Math.Pow(2, retryCount);
+                        Debug.WriteLine($"[Cam4] Browser update message detected on page {pageNum}. Waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
+                        UiLog($"Browser update message on page {pageNum}, waiting {waitSeconds}s...", output, progress);
+                        if (retryCount < maxRetries)
+                        {
+                            await Task.Delay(waitSeconds * 1000, cancellationToken);
+                            await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                            continue;
+                        }
+                        else
+                        {
+                            UiLog($"Browser update persisted. Moving to next page.", output, progress);
+                            pageProcessed = true;
+                            break;
+                        }
                     }
-                }
-                else
-                {
-                    Debug.WriteLine($"[Cam4] Page {pageNum} has no cards, moving to next page.");
+
+                    // Cloudflare challenge detection (fallback)
+                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare"))
+                    {
+                        retryCount++;
+                        int waitSeconds = (int)Math.Pow(2, retryCount);
+                        Debug.WriteLine($"[Cam4] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
+                        UiLog($"Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s...", output, progress);
+                        if (retryCount < maxRetries)
+                        {
+                            await Task.Delay(waitSeconds * 1000, cancellationToken);
+                            await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                            continue;
+                        }
+                        else
+                        {
+                            UiLog($"Cloudflare challenge persisted. Moving to next page.", output, progress);
+                            pageProcessed = true;
+                            break;
+                        }
+                    }
+
+                    // Consent on first page
+                    if (pageNum == 1 && !_consentHandled.Contains(Site.Cam4))
+                    {
+                        Debug.WriteLine("[Cam4] Checking consent button");
+                        bool consentClicked = false;
+
+                        try
+                        {
+                            var dialog = await page.WaitForSelectorAsync("dialog[data-id='AgeConsentDisclaimer']", new PageWaitForSelectorOptions { Timeout = 15000 });
+                            if (dialog != null)
+                            {
+                                var agreeButton = await dialog.QuerySelectorAsync("button[data-id='Agree']");
+                                if (agreeButton != null)
+                                {
+                                    await agreeButton.ClickAsync();
+                                    await Task.Delay(2000, cancellationToken);
+                                    consentClicked = true;
+                                    UiLog("Consent accepted (normal click).", output, progress);
+                                }
+                            }
+                        }
+                        catch (TimeoutException)
+                        {
+                            Debug.WriteLine("[Cam4] Consent button not found, trying JS fallback");
+                        }
+
+                        if (!consentClicked)
+                        {
+                            try
+                            {
+                                // JavaScript as a single line
+                                var result = await page.EvaluateAsync<bool>("() => { const dialog = document.querySelector('dialog[data-id=\"AgeConsentDisclaimer\"]'); if(dialog) { const btn = dialog.querySelector('button[data-id=\"Agree\"]'); if(btn) { btn.click(); return true; } } return false; }");
+                                if (result)
+                                {
+                                    Debug.WriteLine("[Cam4] Consent clicked via JavaScript");
+                                    await Task.Delay(2000, cancellationToken);
+                                    consentClicked = true;
+                                    UiLog("Consent accepted (JS fallback).", output, progress);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine($"[Cam4] JS consent click failed: {ex.Message}");
+                            }
+                        }
+
+                        lock (_consentLock) _consentHandled.Add(Site.Cam4);
+                    }
+
+                    // Wait for cards – correct selector
+                    IReadOnlyList<IElementHandle>? cards = null;
+                    try
+                    {
+                        await page.WaitForSelectorAsync("div.mZ7td[data-section-id='Broadcast Thumbnail']", new PageWaitForSelectorOptions { Timeout = 60000 });
+                        cards = await page.QuerySelectorAllAsync("div.mZ7td[data-section-id='Broadcast Thumbnail']");
+                    }
+                    catch (TimeoutException)
+                    {
+                        retryCount++;
+                        UiLog($"Timeout waiting for cards on page {pageNum} (retry {retryCount}/{maxRetries}). Refreshing...", output, progress);
+                        if (retryCount < maxRetries) continue;
+                        else
+                        {
+                            UiLog($"Max retries reached. Moving to next page.", output, progress);
+                            pageProcessed = true;
+                            break;
+                        }
+                    }
+
+                    if (cards == null || cards.Count == 0)
+                    {
+                        retryCount++;
+                        UiLog($"No cards on page {pageNum} (retry {retryCount}/{maxRetries}). Refreshing...", output, progress);
+                        if (retryCount < maxRetries) continue;
+                        else
+                        {
+                            UiLog($"Max retries reached. Moving to next page.", output, progress);
+                            pageProcessed = true;
+                            break;
+                        }
+                    }
+
+                    pageProcessed = true;
+                    UiLog($"Page {pageNum}: found {cards.Count} models.", output, progress);
+
+                    // Sample first 5 usernames
+                    var sampleTasks = cards.Take(5).Select(async card =>
+                    {
+                        var nameEl = await card.QuerySelectorAsync("div.MvVrh");
+                        return nameEl == null ? "null" : (await nameEl.TextContentAsync())?.Trim() ?? "empty";
+                    });
+                    var samples = await Task.WhenAll(sampleTasks);
+                    output.Add($"Sample usernames: {string.Join(", ", samples)}");
+                    Debug.WriteLine($"[Cam4] Sample usernames: {string.Join(", ", samples)}");
+
+                    for (int i = 0; i < cards.Count; i++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var card = cards[i];
+                        var nameElement = await card.QuerySelectorAsync("div.MvVrh");
+                        if (nameElement == null) continue;
+                        var username = await nameElement.TextContentAsync();
+                        username = username?.Trim() ?? "";
+
+                        string viewers = "N/A";
+                        var viewersElement = await card.QuerySelectorAsync("div.lAOFo");
+                        if (viewersElement != null)
+                        {
+                            var viewersText = await viewersElement.TextContentAsync();
+                            viewers = viewersText?.Trim() ?? "N/A";
+                            var match = Regex.Match(viewersText, @"(\d+)");
+                            if (match.Success)
+                                viewers = match.Value;
+                        }
+
+                        if (username.Equals(modelName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            int localPos = i + 1;
+                            int totalRank = globalCount + localPos;
+                            var foundMsg = $"Found '{modelName}' (display: {username}) on page {pageNum}, position {localPos} (overall rank: {totalRank}) | Viewers: {viewers}";
+                            UiLog(foundMsg, output, progress);
+                            Debug.WriteLine($"[Cam4] FOUND: {foundMsg}");
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found)
+                        globalCount += cards.Count;
                 }
 
                 if (!found)
                 {
-                    if (lastPage.HasValue && pageNum >= lastPage.Value)
-                    {
-                        UiLog($"Reached last page ({lastPage.Value}) without finding the model.", output, progress);
-                        break;
-                    }
                     pageNum++;
-                    int delay = _random.Next(2000, 4000);
-                    await Task.Delay(delay, cancellationToken);
+                    await Task.Delay(_random.Next(2000, 5000), cancellationToken);
                 }
             }
         }
         catch (OperationCanceledException)
         {
             UiLog("Search cancelled.", output, progress);
+            Debug.WriteLine("[Cam4] Search cancelled");
+        }
+        catch (Exception ex) when (ex.GetType().Name == "TargetClosedException")
+        {
+            UiLog("Search cancelled (browser closed).", output, progress);
+            Debug.WriteLine("[Cam4] Search cancelled (TargetClosedException)");
         }
         catch (Exception ex)
         {
@@ -115,172 +266,6 @@ public class Cam4Scraper : ISiteScraper
         }
 
         return output;
-    }
-
-    private async Task<bool> NavigateWithRetryAsync(IPage page, string url, List<string> output, IProgress<string>? progress, CancellationToken token, int maxRetries = 3)
-    {
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
-        {
-            try
-            {
-                await page.GotoAsync(url, new PageGotoOptions
-                {
-                    WaitUntil = WaitUntilState.DOMContentLoaded,
-                    Timeout = 15000
-                });
-                return true;
-            }
-            catch (TimeoutException)
-            {
-                Debug.WriteLine($"[Cam4] Navigation timeout (attempt {attempt})");
-                if (attempt == maxRetries) return false;
-                await Task.Delay(2000 * attempt, token);
-            }
-        }
-        return false;
-    }
-
-    private async Task HandleConsentAsync(IPage page, List<string> output, IProgress<string>? progress, CancellationToken token)
-    {
-        try
-        {
-            var dialog = await page.WaitForSelectorAsync("dialog[data-id='AgeConsentDisclaimer']", new PageWaitForSelectorOptions { Timeout = 15000 });
-            if (dialog != null)
-            {
-                var agreeButton = await dialog.QuerySelectorAsync("button[data-id='Agree']");
-                if (agreeButton != null)
-                {
-                    await agreeButton.ClickAsync();
-                    await Task.Delay(2000, token);
-                    Debug.WriteLine("[Cam4] Consent accepted.");
-                }
-            }
-        }
-        catch (TimeoutException)
-        {
-            Debug.WriteLine("[Cam4] No consent dialog found – proceeding.");
-        }
-    }
-
-    private async Task<(IReadOnlyList<IElementHandle>? cards, bool shouldStop)> ProcessPageAsync(IPage page, int pageNum, List<string> output, IProgress<string>? progress, CancellationToken token)
-    {
-        const int maxRetrySeconds = 120;
-        var startTime = DateTime.UtcNow;
-
-        while ((DateTime.UtcNow - startTime).TotalSeconds < maxRetrySeconds && !token.IsCancellationRequested)
-        {
-            bool hasCardsIndicator = false;
-            bool hasPagination = false;
-            try
-            {
-                var waitResult = await page.WaitForFunctionAsync(@"() => {
-                    return {
-                        cards: document.querySelector('div.mZ7td[data-section-id=\'Broadcast Thumbnail\']') !== null,
-                        pagination: document.querySelector('a[data-action-id=\'Last Page\']') !== null
-                    };
-                }", new PageWaitForFunctionOptions { Timeout = 15000 });
-                var result = await waitResult.JsonValueAsync<dynamic>();
-                hasCardsIndicator = result.cards;
-                hasPagination = result.pagination;
-            }
-            catch (TimeoutException)
-            {
-                Debug.WriteLine($"[Cam4] Page {pageNum} – no cards or pagination after initial wait.");
-            }
-
-            int[] delays = { 2000, 4000, 6000, 10000 };
-            foreach (var delayMs in delays)
-            {
-                token.ThrowIfCancellationRequested();
-                var cards = await page.QuerySelectorAllAsync("div.mZ7td[data-section-id='Broadcast Thumbnail']");
-                if (cards.Count > 0)
-                {
-                    Debug.WriteLine($"[Cam4] Page {pageNum}: found {cards.Count} cards after attempt.");
-                    return (cards, false);
-                }
-                Debug.WriteLine($"[Cam4] Page {pageNum}: no cards after {delayMs / 1000}s, waiting...");
-                await Task.Delay(delayMs, token);
-            }
-
-            if ((DateTime.UtcNow - startTime).TotalSeconds < maxRetrySeconds - 5)
-            {
-                Debug.WriteLine($"[Cam4] Page {pageNum} – no cards after attempts. Refreshing...");
-                await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                await Task.Delay(2000, token);
-                continue;
-            }
-            else
-            {
-                var nextButton = await page.QuerySelectorAsync("a[data-action-id='Next Page']:not([disabled])");
-                if (nextButton != null)
-                {
-                    Debug.WriteLine($"[Cam4] Page {pageNum} – no cards after {maxRetrySeconds}s, but next button exists. Moving to next page.");
-                    return (null, false);
-                }
-                else
-                {
-                    Debug.WriteLine($"[Cam4] Page {pageNum} – no cards and no next button after {maxRetrySeconds}s. End of listings.");
-                    return (null, true);
-                }
-            }
-        }
-
-        var finalNext = await page.QuerySelectorAsync("a[data-action-id='Next Page']:not([disabled])");
-        if (finalNext != null)
-        {
-            Debug.WriteLine($"[Cam4] Page {pageNum} – timed out after {maxRetrySeconds}s, but next button exists. Moving to next page.");
-            return (null, false);
-        }
-        else
-        {
-            Debug.WriteLine($"[Cam4] Page {pageNum} – timed out after {maxRetrySeconds}s with no next button. End of listings.");
-            return (null, true);
-        }
-    }
-
-    private async Task<bool> SearchCardsAsync(IReadOnlyList<IElementHandle> cards, string modelName, int pageNum, int globalCount, List<string> output, IProgress<string>? progress, CancellationToken token)
-    {
-        UiLog($"Page {pageNum}: found {cards.Count} models.", output, progress);
-
-        var sampleTasks = cards.Take(5).Select(async card =>
-        {
-            var nameEl = await card.QuerySelectorAsync("div.MvVrh");
-            return nameEl == null ? "null" : (await nameEl.TextContentAsync())?.Trim() ?? "empty";
-        });
-        var samples = await Task.WhenAll(sampleTasks);
-        Debug.WriteLine($"[Cam4] Sample usernames: {string.Join(", ", samples)}");
-
-        for (int i = 0; i < cards.Count; i++)
-        {
-            token.ThrowIfCancellationRequested();
-            var card = cards[i];
-
-            var nameElement = await card.QuerySelectorAsync("div.MvVrh");
-            if (nameElement == null) continue;
-            var username = await nameElement.TextContentAsync();
-            username = username?.Trim() ?? "";
-
-            var viewersElement = await card.QuerySelectorAsync("div.lAOFo");
-            string viewers = "N/A";
-            if (viewersElement != null)
-            {
-                var viewersText = await viewersElement.TextContentAsync();
-                viewers = viewersText?.Trim() ?? "N/A";
-                var match = Regex.Match(viewersText, @"(\d+)");
-                if (match.Success)
-                    viewers = match.Value;
-            }
-
-            if (username.Equals(modelName, StringComparison.OrdinalIgnoreCase))
-            {
-                int localPos = i + 1;
-                int totalRank = globalCount + localPos;
-                var foundMsg = $"Found '{modelName}' (display: {username}) on page {pageNum}, position {localPos} (overall rank: {totalRank}) | Viewers: {viewers}";
-                UiLog(foundMsg, output, progress);
-                return true;
-            }
-        }
-        return false;
     }
 
     private void UiLog(string message, List<string> output, IProgress<string>? progress)

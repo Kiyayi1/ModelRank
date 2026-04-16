@@ -2,7 +2,6 @@
 @using ModelRank.Models
 @using System.Text.RegularExpressions
 @inject IMonitoringService MonitoringService
-@inject MonitoringService ConcreteMonitoringService
 @inject IStorageService StorageService
 @inject IJSRuntime JSRuntime
 @implements IDisposable
@@ -25,197 +24,181 @@
             <button class="btn btn-danger btn-sm" @onclick="StopMonitoring" disabled="@(state?.IsMonitoring != true)">Stop</button>
             <button class="btn btn-info btn-sm" @onclick="ToggleFilterPanel">Filters</button>
         </div>
+    </div>
 
-        <!-- toggles -->
-        <div class="ms-auto">
-            <div class="form-check form-switch">
-                <input class="form-check-input" type="checkbox" id="parallelSwitch"
-                       @bind="ConcreteMonitoringService.UseParallelSearch"
-                       disabled="@(state?.IsMonitoring == true)">
-                    <label class="form-check-label" for="parallelSwitch">Parallel search (Chaturbate only)</label>
-                </div>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="torSwitch"
-                           @bind="ConcreteMonitoringService.UseTor"
-                           disabled="@(!ConcreteMonitoringService.UseParallelSearch || state?.IsMonitoring == true)">
-                        <label class="form-check-label" for="torSwitch">Use Tor proxy</label>
+    <!-- Collapsible filter panel -->
+    @if (showFilterPanel)
+    {
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="d-flex flex-wrap align-items-end gap-2">
+                    <div style="min-width:200px;">
+                        <label class="form-label small">Select Model</label>
+                        <select @onchange="OnFilterModelChanged" class="form-select form-select-sm">
+                            <option value="">Choose a model</option>
+                            @foreach (var m in filterModels)
+                            {
+                                <option value="@m" selected="@(selectedFilterModel == m)">@m</option>
+                            }
+                        </select>
+                    </div>
+                    <div style="min-width:150px;">
+                        <label class="form-label small">From</label>
+                        <input type="datetime-local" @bind="filterStart" class="form-control form-control-sm" />
+                    </div>
+                    <div style="min-width:150px;">
+                        <label class="form-label small">To</label>
+                        <input type="datetime-local" @bind="filterEnd" class="form-control form-control-sm" />
+                    </div>
+                    <div>
+                        <button class="btn btn-secondary btn-sm me-1" @onclick="ApplyFilter">Apply</button>
+                        <button class="btn btn-outline-secondary btn-sm me-1" @onclick="ClearFilter">Clear</button>
+                        @if (filteredResults.Any())
+                        {
+                            <button class="btn btn-danger btn-sm" @onclick="DeleteAllFiltered">Delete All</button>
+                        }
                     </div>
                 </div>
             </div>
-
-            <!-- Collapsible filter panel -->
-            @if (showFilterPanel)
-            {
-                <div class="card mb-3">
-                    <div class="card-body">
-                        <div class="d-flex flex-wrap align-items-end gap-2">
-                            <div style="min-width:200px;">
-                                <label class="form-label small">Select Model</label>
-                                <select @onchange="OnFilterModelChanged" class="form-select form-select-sm">
-                                    <option value="">Choose a model</option>
-                                    @foreach (var m in filterModels)
-                                    {
-                                        <option value="@m" selected="@(selectedFilterModel == m)">@m</option>
-                                    }
-                                </select>
-                            </div>
-                            <div style="min-width:150px;">
-                                <label class="form-label small">From</label>
-                                <input type="datetime-local" @bind="filterStart" class="form-control form-control-sm" />
-                            </div>
-                            <div style="min-width:150px;">
-                                <label class="form-label small">To</label>
-                                <input type="datetime-local" @bind="filterEnd" class="form-control form-control-sm" />
-                            </div>
-                            <div>
-                                <button class="btn btn-secondary btn-sm me-1" @onclick="ApplyFilter">Apply</button>
-                                <button class="btn btn-outline-secondary btn-sm me-1" @onclick="ClearFilter">Clear</button>
-                                @if (filteredResults.Any())
-                                {
-                                    <button class="btn btn-danger btn-sm" @onclick="DeleteAllFiltered">Delete All</button>
-                                }
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            }
-
-            <!-- Status message -->
-            @if (!string.IsNullOrEmpty(state?.StatusMessage))
-            {
-                <div class="alert alert-info mt-2 status-area">
-                    <pre class="status-text">@state.StatusMessage</pre>
-                </div>
-            }
-
-            <!-- Live monitoring results table -->
-            @if (!isViewingFiltered && state?.Results.Any() == true)
-            {
-                <h4 class="mt-4">
-                    @{
-                        var latestResult = state.Results.LastOrDefault();
-                        string displayName;
-                        if (latestResult != null && !string.IsNullOrEmpty(latestResult.DisplayName) && !string.Equals(latestResult.ModelName, latestResult.DisplayName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            displayName = latestResult.DisplayName;
-                        }
-                        else
-                        {
-                            displayName = FormatDisplayName(state.ModelName);
-                        }
-
-                        if (!string.IsNullOrEmpty(displayName) && !string.Equals(state.ModelName, displayName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            <span>Live Monitoring: @state.ModelName (@displayName)</span>
-                        }
-                        else
-                        {
-                            <span>Live Monitoring: @state.ModelName</span>
-                        }
-                    }
-                </h4>
-                <table class="table table-sm table-striped">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Page</th>
-                            <th>Position</th>
-                            <th>Rank</th>
-                            <th>Viewers</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach (var item in state.Results.OrderByDescending(r => r.Timestamp))
-                        {
-                            <tr>
-                                <td>@FormatTimestamp(item.Timestamp)</td>
-                                <td>@item.Page</td>
-                                <td>@item.Position</td>
-                                <td>
-                                    @item.Rank
-                                    @if (item.RankChange.HasValue && item.RankChange != 0)
-                                    {
-                                        <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
-                                            @(item.RankChange > 0 ? "▲" : "▼")
-                                        </span>
-                                    }
-                                </td>
-                                <td>
-                                    @item.Viewers
-                                    @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
-                                    {
-                                        <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
-                                            @(item.ViewersChange > 0 ? "▲" : "▼")
-                                        </span>
-                                    }
-                                </td>
-                            </tr>
-                        }
-                    </tbody>
-                </table>
-            }
-
-            <!-- Filtered results table (with delete buttons) -->
-            @if (isViewingFiltered && filteredResults.Any())
-            {
-                <h4 class="mt-4">
-                    @{
-                        var firstResult = filteredResults.FirstOrDefault();
-                        if (firstResult != null && !string.IsNullOrEmpty(firstResult.DisplayName) && !string.Equals(firstResult.ModelName, firstResult.DisplayName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            <span>Filtered Results for @selectedFilterModel (@firstResult.DisplayName)</span>
-                        }
-                        else
-                        {
-                            <span>Filtered Results for @selectedFilterModel</span>
-                        }
-                    }
-                </h4>
-                <table class="table table-sm table-striped">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Page</th>
-                            <th>Position</th>
-                            <th>Rank</th>
-                            <th>Viewers</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach (var item in filteredResults.OrderByDescending(r => r.Timestamp))
-                        {
-                            <tr>
-                                <td>@FormatFullTimestamp(item.Timestamp)</td>
-                                <td>@item.Page</td>
-                                <td>@item.Position</td>
-                                <td>
-                                    @item.Rank
-                                    @if (item.RankChange.HasValue && item.RankChange != 0)
-                                    {
-                                        <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
-                                            @(item.RankChange > 0 ? "▲" : "▼")
-                                        </span>
-                                    }
-                                </td>
-                                <td>
-                                    @item.Viewers
-                                    @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
-                                    {
-                                        <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
-                                            @(item.ViewersChange > 0 ? "▲" : "▼")
-                                        </span>
-                                    }
-                                </td>
-                                <td>
-                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteResult(item.Id)" title="Delete this entry">🗑️</button>
-                                </td>
-                            </tr>
-                        }
-                    </tbody>
-                </table>
-            }
         </div>
+    }
+
+    <!-- Status message -->
+    @if (!string.IsNullOrEmpty(state?.StatusMessage))
+    {
+        <div class="alert alert-info mt-2 status-area">
+            <pre class="status-text">@state.StatusMessage</pre>
+        </div>
+    }
+
+    <!-- Live monitoring results table -->
+    @if (!isViewingFiltered && state?.Results.Any() == true)
+    {
+        <h4 class="mt-4">
+            @{
+                var latestResult = state.Results.LastOrDefault();
+                string displayName;
+                if (latestResult != null && !string.IsNullOrEmpty(latestResult.DisplayName) && !string.Equals(latestResult.ModelName, latestResult.DisplayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    displayName = latestResult.DisplayName;
+                }
+                else
+                {
+                    displayName = FormatDisplayName(state.ModelName);
+                }
+
+                if (!string.IsNullOrEmpty(displayName) && !string.Equals(state.ModelName, displayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    <span>Live Monitoring: @state.ModelName (@displayName)</span>
+                }
+                else
+                {
+                    <span>Live Monitoring: @state.ModelName</span>
+                }
+            }
+        </h4>
+        <table class="table table-sm table-striped">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Page</th>
+                    <th>Position</th>
+                    <th>Rank</th>
+                    <th>Viewers</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var item in state.Results.OrderByDescending(r => r.Timestamp))
+                {
+                    <tr>
+                        <td>@FormatTimestamp(item.Timestamp)</td>
+                        <td>@item.Page</td>
+                        <td>@item.Position</td>
+                        <td>
+                            @item.Rank
+                            @if (item.RankChange.HasValue && item.RankChange != 0)
+                            {
+                                <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
+                                    @(item.RankChange > 0 ? "▲" : "▼")
+                                </span>
+                            }
+                        </td>
+                        <td>
+                            @item.Viewers
+                            @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
+                            {
+                                <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
+                                    @(item.ViewersChange > 0 ? "▲" : "▼")
+                                </span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <!-- Filtered results table (with delete buttons) -->
+    @if (isViewingFiltered && filteredResults.Any())
+    {
+        <h4 class="mt-4">
+            @{
+                var firstResult = filteredResults.FirstOrDefault();
+                if (firstResult != null && !string.IsNullOrEmpty(firstResult.DisplayName) && !string.Equals(firstResult.ModelName, firstResult.DisplayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    <span>Filtered Results for @selectedFilterModel (@firstResult.DisplayName)</span>
+                }
+                else
+                {
+                    <span>Filtered Results for @selectedFilterModel</span>
+                }
+            }
+        </h4>
+        <table class="table table-sm table-striped">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Page</th>
+                    <th>Position</th>
+                    <th>Rank</th>
+                    <th>Viewers</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var item in filteredResults.OrderByDescending(r => r.Timestamp))
+                {
+                    <tr>
+                        <td>@FormatFullTimestamp(item.Timestamp)</td>
+                        <td>@item.Page</td>
+                        <td>@item.Position</td>
+                        <td>
+                            @item.Rank
+                            @if (item.RankChange.HasValue && item.RankChange != 0)
+                            {
+                                <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
+                                    @(item.RankChange > 0 ? "▲" : "▼")
+                                </span>
+                            }
+                        </td>
+                        <td>
+                            @item.Viewers
+                            @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
+                            {
+                                <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
+                                    @(item.ViewersChange > 0 ? "▲" : "▼")
+                                </span>
+                            }
+                        </td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteResult(item.Id)" title="Delete this entry">🗑️</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
 
 @code {
     [Parameter] public Site Site { get; set; }
@@ -260,8 +243,6 @@
     protected override void OnInitialized()
     {
         base.OnInitialized();
-        Debug.WriteLine($"SiteTab: ConcreteMonitoringService hash = {ConcreteMonitoringService.GetHashCode()}");
-
         state = MonitoringService.GetState(Site);
         if (state.IntervalMinutes == 0) state.IntervalMinutes = 5;
         localModelName = state.ModelName;
