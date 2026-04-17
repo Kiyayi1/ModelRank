@@ -78,10 +78,11 @@ public class MonitoringService : IMonitoringService
             state.IsMonitoring = false;
             state.StatusMessage = "Monitoring stopped.";
             StateChanged?.Invoke(site);
-            _ = _browserService.ResetAsync();
+            // Do NOT reset the browser – just cancel the loop
+            // Optionally, close the page for this site
+            _ = _browserService.ClosePageAsync(site);
         }
     }
-
     private async Task RunMonitoringLoopAsync(Site site, CancellationToken token)
     {
         var state = GetState(site);
@@ -110,6 +111,12 @@ public class MonitoringService : IMonitoringService
             try
             {
                 var output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
+                // Check for cancellation immediately after the scraper returns
+                if (token.IsCancellationRequested)
+                {
+                    state.StatusMessage = "Monitoring stopped.";
+                    break;
+                }
                 var result = ParseResult(output);
 
                 if (result != null)
@@ -137,12 +144,9 @@ public class MonitoringService : IMonitoringService
             }
             catch (OperationCanceledException)
             {
-                if (token.IsCancellationRequested)
-                {
-                    state.StatusMessage = "Monitoring stopped.";
-                    break;
-                }
-                state.StatusMessage = $"Search cancelled. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
+                // User pressed Stop – exit immediately
+                state.StatusMessage = "Monitoring stopped.";
+                break;
             }
             catch (Exception ex) when (ex.GetType().Name == "TargetClosedException")
             {
@@ -165,6 +169,7 @@ public class MonitoringService : IMonitoringService
 
             if (token.IsCancellationRequested) break;
 
+            // Countdown loop – only runs if not cancelled
             var waitEnd = DateTime.UtcNow.AddMilliseconds(intervalMs);
             while (DateTime.UtcNow < waitEnd && !token.IsCancellationRequested)
             {

@@ -44,27 +44,51 @@ public class BrowserService : IBrowserService
             {
                 _playwright = await Playwright.CreateAsync();
 
-                // Launch Firefox (headless mode controlled by const)
-                _browser = await _playwright.Firefox.LaunchAsync(new BrowserTypeLaunchOptions
+                // Launch Chromium (original)
+                _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
                 {
-                    Headless = Headless,  // true for production, false for debugging
-                    Args = new[] { "--no-sandbox" }
+                    Headless = Headless,
+                    Args = new[]
+                    {
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-web-security",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--disable-sync",
+                    "--disable-translate",
+                    "--hide-scrollbars",
+                    "--metrics-recording-only",
+                    "--mute-audio",
+                    "--no-first-run",
+                    "--password-store=basic"
+                }
                 });
 
                 _context = await _browser.NewContextAsync(new BrowserNewContextOptions
                 {
                     ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-                    UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
+                    UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                     Locale = "en-US",
                     TimezoneId = "Africa/Nairobi",
                     ScreenSize = new ScreenSize { Width = 1920, Height = 1080 }
                 });
 
-                // Stealth script for Firefox (overrides navigator.webdriver, etc.)
                 await _context.AddInitScriptAsync(@"() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
             }");
             }
 
