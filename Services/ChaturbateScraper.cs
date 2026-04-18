@@ -30,12 +30,12 @@ public class ChaturbateScraper : ISiteScraper
         UiLog($"Starting new search for '{modelName}' from page 1.", output, progress);
         Debug.WriteLine($"[Chaturbate] Starting search for {modelName}");
 
-        page.SetDefaultTimeout(300_000); // 5 minutes
+        page.SetDefaultTimeout(600_000); // 10 minutes (increased)
 
         int pageNum = 1;
         bool found = false;
         int globalCount = 0;
-        const int maxRetries = 3;
+        const int maxRetries = 10; // much higher
 
         try
         {
@@ -56,23 +56,40 @@ public class ChaturbateScraper : ISiteScraper
                     await page.Context.SetExtraHTTPHeadersAsync(new Dictionary<string, string> { { "User-Agent", userAgent } });
                     Debug.WriteLine($"[Chaturbate] Using user agent: {userAgent}");
 
-                    await Task.Delay(_random.Next(2000, 5000), cancellationToken);
+                    // Random delay before navigation (3-7 seconds)
+                    await Task.Delay(_random.Next(3000, 7000), cancellationToken);
                     Debug.WriteLine($"[Chaturbate] Navigating to {url}");
                     await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
-                    Debug.WriteLine("[Chaturbate] Navigation completed, waiting for DOM content");
                     await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
                     Debug.WriteLine("[Chaturbate] DOM ready");
 
                     var title = await page.TitleAsync();
                     Debug.WriteLine($"[Chaturbate] Page title: {title}");
 
-                    // Cloudflare challenge detection
-                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare"))
+                    // Check page content for Cloudflare challenge (more reliable)
+                    var content = await page.ContentAsync();
+                    bool isChallenge = title.Contains("Just a moment") ||
+                                      title.Contains("security verification") ||
+                                      title.Contains("Cloudflare") ||
+                                      content.Contains("Ray ID:") ||
+                                      content.Contains("Performing security verification");
+
+                    if (isChallenge)
                     {
                         retryCount++;
-                        int waitSeconds = (int)Math.Pow(2, retryCount);
+                        // Exponential backoff starting at 30 seconds, up to 300 seconds (5 minutes)
+                        int waitSeconds = (int)Math.Pow(2, retryCount) * 15;
+                        if (waitSeconds > 300) waitSeconds = 300;
                         Debug.WriteLine($"[Chaturbate] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
                         UiLog($"Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s...", output, progress);
+
+                        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                        string screenshotsDir = Path.Combine(AppContext.BaseDirectory, "DebugScreenshots");
+                        Directory.CreateDirectory(screenshotsDir);
+                        var screenshotPath = Path.Combine(screenshotsDir, $"challenge_page_{pageNum}_{timestamp}.png");
+                        await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath });
+                        Debug.WriteLine($"[Chaturbate] Challenge screenshot saved to {screenshotPath}");
+
                         if (retryCount < maxRetries)
                         {
                             await Task.Delay(waitSeconds * 1000, cancellationToken);
@@ -81,7 +98,7 @@ public class ChaturbateScraper : ISiteScraper
                         }
                         else
                         {
-                            UiLog($"Cloudflare challenge persisted. Moving to next page.", output, progress);
+                            UiLog($"Cloudflare challenge persisted after {maxRetries} retries. Moving to next page.", output, progress);
                             pageProcessed = true;
                             break;
                         }
@@ -146,7 +163,12 @@ public class ChaturbateScraper : ISiteScraper
                     catch (TimeoutException)
                     {
                         retryCount++;
-                        UiLog($"Timeout waiting for cards on page {pageNum} (retry {retryCount}/{maxRetries}). Refreshing...", output, progress);
+                        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                        string screenshotsDir = Path.Combine(AppContext.BaseDirectory, "DebugScreenshots");
+                        Directory.CreateDirectory(screenshotsDir);
+                        var screenshotPath = Path.Combine(screenshotsDir, $"cards_timeout_page_{pageNum}_{timestamp}.png");
+                        await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath });
+                        UiLog($"Timeout waiting for cards on page {pageNum} (retry {retryCount}/{maxRetries}). Screenshot saved to {screenshotPath}", output, progress);
                         if (retryCount < maxRetries) continue;
                         else
                         {

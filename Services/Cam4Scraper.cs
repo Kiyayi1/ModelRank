@@ -36,7 +36,7 @@ public class Cam4Scraper : ISiteScraper
         int pageNum = 1;
         bool found = false;
         int globalCount = 0;
-        const int maxRetries = 3;
+        const int maxRetries = 5;
 
         try
         {
@@ -91,12 +91,23 @@ public class Cam4Scraper : ISiteScraper
                     }
 
                     // Cloudflare challenge detection (fallback)
-                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare"))
+                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare") || title.Contains("DDOS"))
                     {
                         retryCount++;
-                        int waitSeconds = (int)Math.Pow(2, retryCount);
-                        Debug.WriteLine($"[Cam4] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
+                        // Exponential backoff: 10, 20, 40, 80, 160 seconds (max ~5 minutes)
+                        int waitSeconds = (int)Math.Pow(2, retryCount + 2); // 2^3=8 → 8,16,32,64,128
+                        if (waitSeconds > 160) waitSeconds = 160;
+                        Debug.WriteLine($"[Chaturbate] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
                         UiLog($"Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s...", output, progress);
+
+                        // Take a screenshot for debugging
+                        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                        string screenshotsDir = Path.Combine(AppContext.BaseDirectory, "DebugScreenshots");
+                        Directory.CreateDirectory(screenshotsDir);
+                        var screenshotPath = Path.Combine(screenshotsDir, $"challenge_page_{pageNum}_{timestamp}.png");
+                        await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath });
+                        Debug.WriteLine($"[Chaturbate] Challenge screenshot saved to {screenshotPath}");
+
                         if (retryCount < maxRetries)
                         {
                             await Task.Delay(waitSeconds * 1000, cancellationToken);
@@ -105,7 +116,7 @@ public class Cam4Scraper : ISiteScraper
                         }
                         else
                         {
-                            UiLog($"Cloudflare challenge persisted. Moving to next page.", output, progress);
+                            UiLog($"Cloudflare challenge persisted after {maxRetries} retries. Moving to next page.", output, progress);
                             pageProcessed = true;
                             break;
                         }
