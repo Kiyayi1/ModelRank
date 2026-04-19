@@ -181,7 +181,9 @@ public class BrowserService : IBrowserService
     public async Task ClosePageAsync(Site site)
     {
         if (_pages.TryRemove(site, out var page))
+        {
             try { await page.CloseAsync(); } catch { }
+        }
     }
 
     public async ValueTask DisposeAsync()

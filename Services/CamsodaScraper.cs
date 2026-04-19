@@ -34,8 +34,7 @@ public class CamsodaScraper : ISiteScraper
         int pageNum = 1;
         bool found = false;
         int globalCount = 0;
-        int? lastPage = null;
-        const int maxRetries = 5;
+        const int maxRetries = 3;
 
         try
         {
@@ -52,7 +51,6 @@ public class CamsodaScraper : ISiteScraper
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Rotate user agent
                     var userAgent = _userAgents[_random.Next(_userAgents.Length)];
                     await page.Context.SetExtraHTTPHeadersAsync(new Dictionary<string, string> { { "User-Agent", userAgent } });
                     Debug.WriteLine($"[Camsoda] Using user agent: {userAgent}");
@@ -63,28 +61,26 @@ public class CamsodaScraper : ISiteScraper
                     await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
                     Debug.WriteLine("[Camsoda] DOM ready");
 
+                    // End of listings detection
+                    var noResults = await page.QuerySelectorAsync("div[data-camsoda-response-code='404']");
+                    if (noResults != null)
+                    {
+                        UiLog($"No more cams found on page {pageNum}. End of listings.", output, progress);
+                        output.Add("LAST_PAGE_REACHED");
+                        return output;
+                    }
+
                     var title = await page.TitleAsync();
                     Debug.WriteLine($"[Camsoda] Page title: {title}");
 
                     // Cloudflare challenge detection
-                    // Cloudflare challenge detection (improved)
-                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare") || title.Contains("DDOS"))
+                    var content = await page.ContentAsync();
+                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare") || content.Contains("Ray ID:"))
                     {
                         retryCount++;
-                        // Exponential backoff: 10, 20, 40, 80, 160 seconds (max ~5 minutes)
-                        int waitSeconds = (int)Math.Pow(2, retryCount + 2); // 2^3=8 → 8,16,32,64,128
-                        if (waitSeconds > 160) waitSeconds = 160;
-                        Debug.WriteLine($"[Chaturbate] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
+                        int waitSeconds = (int)Math.Pow(2, retryCount);
+                        Debug.WriteLine($"[Camsoda] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
                         UiLog($"Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s...", output, progress);
-
-                        // Take a screenshot for debugging
-                        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                        string screenshotsDir = Path.Combine(AppContext.BaseDirectory, "DebugScreenshots");
-                        Directory.CreateDirectory(screenshotsDir);
-                        var screenshotPath = Path.Combine(screenshotsDir, $"challenge_page_{pageNum}_{timestamp}.png");
-                        await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath });
-                        Debug.WriteLine($"[Chaturbate] Challenge screenshot saved to {screenshotPath}");
-
                         if (retryCount < maxRetries)
                         {
                             await Task.Delay(waitSeconds * 1000, cancellationToken);
@@ -93,7 +89,7 @@ public class CamsodaScraper : ISiteScraper
                         }
                         else
                         {
-                            UiLog($"Cloudflare challenge persisted after {maxRetries} retries. Moving to next page.", output, progress);
+                            UiLog($"Cloudflare challenge persisted. Moving to next page.", output, progress);
                             pageProcessed = true;
                             break;
                         }
@@ -107,7 +103,7 @@ public class CamsodaScraper : ISiteScraper
 
                         try
                         {
-                            var consentButton = await page.WaitForSelectorAsync("button:has-text('I am over 18 - ENTER SITE')", new PageWaitForSelectorOptions { Timeout = 10000 });
+                            var consentButton = await page.WaitForSelectorAsync("button:has-text('I am over 18 - ENTER SITE')", new PageWaitForSelectorOptions { Timeout = 8000 });
                             if (consentButton != null)
                             {
                                 await consentButton.ClickAsync();
@@ -126,8 +122,13 @@ public class CamsodaScraper : ISiteScraper
                             try
                             {
                                 var result = await page.EvaluateAsync<bool>(@"() => {
-                                    const btn = document.querySelector('button:has-text(\'I am over 18 - ENTER SITE\')');
-                                    if(btn) { btn.click(); return true; }
+                                    const btns = document.querySelectorAll('button');
+                                    for(let btn of btns) {
+                                        if(btn.innerText.includes('I am over 18 - ENTER SITE')) {
+                                            btn.click();
+                                            return true;
+                                        }
+                                    }
                                     return false;
                                 }");
                                 if (result)
@@ -200,7 +201,7 @@ public class CamsodaScraper : ISiteScraper
                         var username = await card.GetAttributeAsync("data-username");
                         if (string.IsNullOrEmpty(username)) continue;
 
-                        // Extract display name
+                        // Display name extraction
                         string displayName = username;
                         var displayNameElement = await card.QuerySelectorAsync("span.index-module__displayName--Y8mYz");
                         if (displayNameElement != null)
@@ -216,7 +217,6 @@ public class CamsodaScraper : ISiteScraper
                                 displayName = fullText.Trim();
                         }
 
-                        // Extract viewers
                         string viewers = "N/A";
                         var viewersSpanForCount = await card.QuerySelectorAsync("span.index-module__infoConnectionCount--rl4gs");
                         if (viewersSpanForCount != null)
@@ -224,7 +224,8 @@ public class CamsodaScraper : ISiteScraper
                             var viewersText = await viewersSpanForCount.TextContentAsync();
                             viewers = viewersText?.Trim() ?? "N/A";
                             var match = Regex.Match(viewersText, @"(\d+)");
-                            if (match.Success) viewers = match.Value;
+                            if (match.Success)
+                                viewers = match.Value;
                         }
 
                         if (username.Equals(modelName, StringComparison.OrdinalIgnoreCase))
@@ -281,23 +282,5 @@ public class CamsodaScraper : ISiteScraper
         if (match.Success && int.TryParse(match.Groups[1].Value, out int page))
             return page;
         return 1;
-    }
-
-    private async Task<int?> GetLastPageNumberAsync(IPage page)
-    {
-        try
-        {
-            var pageButtons = await page.QuerySelectorAllAsync("button[aria-label]");
-            int maxPage = 0;
-            foreach (var btn in pageButtons)
-            {
-                var ariaLabel = await btn.GetAttributeAsync("aria-label");
-                if (int.TryParse(ariaLabel, out int pageNum) && pageNum > maxPage)
-                    maxPage = pageNum;
-            }
-            if (maxPage > 0) return maxPage;
-        }
-        catch { }
-        return null;
     }
 }

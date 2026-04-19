@@ -17,7 +17,6 @@ public class Cam4Scraper : ISiteScraper
     private static readonly HashSet<Site> _consentHandled = new HashSet<Site>();
     private static readonly object _consentLock = new object();
 
-    // Realistic user agents (keep the Windows Chrome one first)
     private static readonly string[] _userAgents = new[]
     {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -31,12 +30,12 @@ public class Cam4Scraper : ISiteScraper
         UiLog($"Starting new search for '{modelName}' from page 1.", output, progress);
         Debug.WriteLine($"[Cam4] Starting search for {modelName}");
 
-        page.SetDefaultTimeout(300_000); // 5 minutes
+        page.SetDefaultTimeout(300_000);
 
         int pageNum = 1;
         bool found = false;
         int globalCount = 0;
-        const int maxRetries = 5;
+        const int maxRetries = 3;
 
         try
         {
@@ -53,12 +52,10 @@ public class Cam4Scraper : ISiteScraper
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Rotate user agent
                     var userAgent = _userAgents[_random.Next(_userAgents.Length)];
                     await page.Context.SetExtraHTTPHeadersAsync(new Dictionary<string, string> { { "User-Agent", userAgent } });
                     Debug.WriteLine($"[Cam4] Using user agent: {userAgent}");
 
-                    // Random delay before navigation (2-5 seconds)
                     await Task.Delay(_random.Next(2000, 5000), cancellationToken);
                     Debug.WriteLine($"[Cam4] Navigating to {url}");
                     await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
@@ -68,14 +65,23 @@ public class Cam4Scraper : ISiteScraper
                     var title = await page.TitleAsync();
                     Debug.WriteLine($"[Cam4] Page title: {title}");
 
-                    // Detect "Browser Update" message (Cam4's anti‑bot)
+                    // End of listings detection
+                    var noResults = await page.QuerySelectorAsync("div.RmjgJ");
+                    if (noResults != null)
+                    {
+                        UiLog($"No results found on page {pageNum}. End of listings.", output, progress);
+                        output.Add("LAST_PAGE_REACHED");
+                        return output;
+                    }
+
+                    // Cloudflare / browser update detection
                     var content = await page.ContentAsync();
-                    if (content.Contains("Browser Update") || content.Contains("update your browser") || title.Contains("Browser Update"))
+                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare") || content.Contains("Browser Update") || content.Contains("Ray ID:"))
                     {
                         retryCount++;
                         int waitSeconds = (int)Math.Pow(2, retryCount);
-                        Debug.WriteLine($"[Cam4] Browser update message detected on page {pageNum}. Waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
-                        UiLog($"Browser update message on page {pageNum}, waiting {waitSeconds}s...", output, progress);
+                        Debug.WriteLine($"[Cam4] Challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
+                        UiLog($"Challenge on page {pageNum}, waiting {waitSeconds}s...", output, progress);
                         if (retryCount < maxRetries)
                         {
                             await Task.Delay(waitSeconds * 1000, cancellationToken);
@@ -84,39 +90,7 @@ public class Cam4Scraper : ISiteScraper
                         }
                         else
                         {
-                            UiLog($"Browser update persisted. Moving to next page.", output, progress);
-                            pageProcessed = true;
-                            break;
-                        }
-                    }
-
-                    // Cloudflare challenge detection (fallback)
-                    if (title.Contains("Just a moment") || title.Contains("security verification") || title.Contains("Cloudflare") || title.Contains("DDOS"))
-                    {
-                        retryCount++;
-                        // Exponential backoff: 10, 20, 40, 80, 160 seconds (max ~5 minutes)
-                        int waitSeconds = (int)Math.Pow(2, retryCount + 2); // 2^3=8 → 8,16,32,64,128
-                        if (waitSeconds > 160) waitSeconds = 160;
-                        Debug.WriteLine($"[Chaturbate] Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s (retry {retryCount}/{maxRetries})...");
-                        UiLog($"Cloudflare challenge on page {pageNum}, waiting {waitSeconds}s...", output, progress);
-
-                        // Take a screenshot for debugging
-                        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                        string screenshotsDir = Path.Combine(AppContext.BaseDirectory, "DebugScreenshots");
-                        Directory.CreateDirectory(screenshotsDir);
-                        var screenshotPath = Path.Combine(screenshotsDir, $"challenge_page_{pageNum}_{timestamp}.png");
-                        await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath });
-                        Debug.WriteLine($"[Chaturbate] Challenge screenshot saved to {screenshotPath}");
-
-                        if (retryCount < maxRetries)
-                        {
-                            await Task.Delay(waitSeconds * 1000, cancellationToken);
-                            await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                            continue;
-                        }
-                        else
-                        {
-                            UiLog($"Cloudflare challenge persisted after {maxRetries} retries. Moving to next page.", output, progress);
+                            UiLog($"Challenge persisted after {maxRetries} retries. Moving to next page.", output, progress);
                             pageProcessed = true;
                             break;
                         }
@@ -128,32 +102,36 @@ public class Cam4Scraper : ISiteScraper
                         Debug.WriteLine("[Cam4] Checking consent button");
                         bool consentClicked = false;
 
-                        try
+                        var agreeSelectors = new[]
                         {
-                            var dialog = await page.WaitForSelectorAsync("dialog[data-id='AgeConsentDisclaimer']", new PageWaitForSelectorOptions { Timeout = 15000 });
-                            if (dialog != null)
+                            "button:has-text('AGREE')",
+                            "button:has-text('I AGREE')",
+                            "button[data-id='Agree']",
+                            "a:has-text('AGREE')"
+                        };
+
+                        foreach (var selector in agreeSelectors)
+                        {
+                            try
                             {
-                                var agreeButton = await dialog.QuerySelectorAsync("button[data-id='Agree']");
-                                if (agreeButton != null)
+                                var agreeButton = await page.QuerySelectorAsync(selector);
+                                if (agreeButton != null && await agreeButton.IsVisibleAsync())
                                 {
                                     await agreeButton.ClickAsync();
                                     await Task.Delay(2000, cancellationToken);
                                     consentClicked = true;
-                                    UiLog("Consent accepted (normal click).", output, progress);
+                                    UiLog($"Consent accepted via {selector}.", output, progress);
+                                    break;
                                 }
                             }
-                        }
-                        catch (TimeoutException)
-                        {
-                            Debug.WriteLine("[Cam4] Consent button not found, trying JS fallback");
+                            catch { }
                         }
 
                         if (!consentClicked)
                         {
                             try
                             {
-                                // JavaScript as a single line
-                                var result = await page.EvaluateAsync<bool>("() => { const dialog = document.querySelector('dialog[data-id=\"AgeConsentDisclaimer\"]'); if(dialog) { const btn = dialog.querySelector('button[data-id=\"Agree\"]'); if(btn) { btn.click(); return true; } } return false; }");
+                                var result = await page.EvaluateAsync<bool>("() => { const btns = document.querySelectorAll('button'); for(let btn of btns) { if(btn.innerText.includes('AGREE')) { btn.click(); return true; } } return false; }");
                                 if (result)
                                 {
                                     Debug.WriteLine("[Cam4] Consent clicked via JavaScript");
@@ -168,10 +146,13 @@ public class Cam4Scraper : ISiteScraper
                             }
                         }
 
+                        if (consentClicked)
+                            await Task.Delay(3000, cancellationToken);
+
                         lock (_consentLock) _consentHandled.Add(Site.Cam4);
                     }
 
-                    // Wait for cards – correct selector
+                    // Wait for cards
                     IReadOnlyList<IElementHandle>? cards = null;
                     try
                     {
@@ -291,21 +272,5 @@ public class Cam4Scraper : ISiteScraper
         if (match.Success && int.TryParse(match.Groups[1].Value, out int page))
             return page;
         return 1;
-    }
-
-    private async Task<int?> GetLastPageNumberAsync(IPage page)
-    {
-        try
-        {
-            var lastPageLink = await page.QuerySelectorAsync("a[data-action-id='Last Page']");
-            if (lastPageLink != null)
-            {
-                var lastPageAttr = await lastPageLink.GetAttributeAsync("data-value");
-                if (int.TryParse(lastPageAttr, out int last))
-                    return last;
-            }
-        }
-        catch { }
-        return null;
     }
 }

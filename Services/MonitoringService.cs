@@ -16,10 +16,7 @@ public class MonitoringService : IMonitoringService
 
     public event Action<Site>? StateChanged;
 
-    public MonitoringService(
-        ISiteScraperFactory scraperFactory,
-        IStorageService storageService,
-        IBrowserService browserService)
+    public MonitoringService(ISiteScraperFactory scraperFactory, IStorageService storageService, IBrowserService browserService)
     {
         _scraperFactory = scraperFactory;
         _storageService = storageService;
@@ -78,11 +75,10 @@ public class MonitoringService : IMonitoringService
             state.IsMonitoring = false;
             state.StatusMessage = "Monitoring stopped.";
             StateChanged?.Invoke(site);
-            // Do NOT reset the browser – just cancel the loop
-            // Optionally, close the page for this site
             _ = _browserService.ClosePageAsync(site);
         }
     }
+
     private async Task RunMonitoringLoopAsync(Site site, CancellationToken token)
     {
         var state = GetState(site);
@@ -111,14 +107,9 @@ public class MonitoringService : IMonitoringService
             try
             {
                 var output = await scraper.FindModelRankAsync(page, state.ModelName, progress, token);
-                // Check for cancellation immediately after the scraper returns
-                if (token.IsCancellationRequested)
-                {
-                    state.StatusMessage = "Monitoring stopped.";
-                    break;
-                }
-                var result = ParseResult(output);
+                if (token.IsCancellationRequested) break;
 
+                var result = ParseResult(output);
                 if (result != null)
                 {
                     result.Site = site;
@@ -139,14 +130,26 @@ public class MonitoringService : IMonitoringService
                 }
                 else
                 {
-                    state.StatusMessage = $"No result this time. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
+                    bool lastPageReached = output.Contains("LAST_PAGE_REACHED");
+                    if (lastPageReached)
+                    {
+                        state.StatusMessage = $"Model not found after scanning all pages. Restarting immediately from page 1.";
+                        continue; // skip countdown
+                    }
+                    else
+                    {
+                        state.StatusMessage = $"No result this time. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
+                    }
                 }
             }
             catch (OperationCanceledException)
             {
-                // User pressed Stop – exit immediately
-                state.StatusMessage = "Monitoring stopped.";
-                break;
+                if (token.IsCancellationRequested)
+                {
+                    state.StatusMessage = "Monitoring stopped.";
+                    break;
+                }
+                state.StatusMessage = $"Search cancelled. Next check in {FormatTimeSpan(TimeSpan.FromMilliseconds(intervalMs))}.";
             }
             catch (Exception ex) when (ex.GetType().Name == "TargetClosedException")
             {
@@ -169,7 +172,7 @@ public class MonitoringService : IMonitoringService
 
             if (token.IsCancellationRequested) break;
 
-            // Countdown loop – only runs if not cancelled
+            // Countdown loop – only if we didn't continue (i.e., model not found but last page not reached)
             var waitEnd = DateTime.UtcNow.AddMilliseconds(intervalMs);
             while (DateTime.UtcNow < waitEnd && !token.IsCancellationRequested)
             {
