@@ -4,11 +4,11 @@ namespace ModelRank.Services;
 
 public class SiteScraperFactory : ISiteScraperFactory
 {
-    private readonly ChaturbateScraper _chaturbate;
+    private readonly ChaturbateApiScraper _chaturbate;
     private readonly CamsodaScraper _camsoda;
     private readonly Cam4Scraper _cam4;
 
-    public SiteScraperFactory(ChaturbateScraper chaturbate, CamsodaScraper camsoda, Cam4Scraper cam4)
+    public SiteScraperFactory(ChaturbateApiScraper chaturbate, CamsodaScraper camsoda, Cam4Scraper cam4)
     {
         _chaturbate = chaturbate;
         _camsoda = camsoda;

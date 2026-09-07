@@ -14,7 +14,7 @@ public class BrowserService : IBrowserService
     private IPlaywright? _playwright;
     private Microsoft.Playwright.IBrowser? _browser;
     private IBrowserContext? _context;
-    private readonly ConcurrentDictionary<Site, IPage> _pages = new();
+    private readonly ConcurrentDictionary<(Site Site, string Key), IPage> _pages = new();
     private bool _disposed;
     private const bool Headless = true;
 
@@ -30,17 +30,19 @@ public class BrowserService : IBrowserService
         Directory.CreateDirectory(UserDataDir);
     }
 
-    public async Task<IPage> GetOrCreatePageAsync(Site site, IProgress<string>? progress = null)
+    public async Task<IPage> GetOrCreatePageAsync(Site site, string trackerKey, IProgress<string>? progress = null)
     {
-        // If we already have a page for this site, return it
-        if (_pages.TryGetValue(site, out var existingPage) && existingPage != null && !existingPage.IsClosed)
+        var pageKey = (site, trackerKey);
+
+        // If we already have a page for this tracker, return it
+        if (_pages.TryGetValue(pageKey, out var existingPage) && existingPage != null && !existingPage.IsClosed)
             return existingPage;
 
         await _initLock.WaitAsync();
         try
         {
             // Double-check after lock
-            if (_pages.TryGetValue(site, out existingPage) && existingPage != null && !existingPage.IsClosed)
+            if (_pages.TryGetValue(pageKey, out existingPage) && existingPage != null && !existingPage.IsClosed)
                 return existingPage;
 
             // Ensure browsers are installed (first run only)
@@ -76,7 +78,7 @@ public class BrowserService : IBrowserService
                 }
 
                 var page = await _contextFirefox!.NewPageAsync();
-                _pages[site] = page;
+                _pages[pageKey] = page;
                 return page;
             }
             else
@@ -133,7 +135,7 @@ public class BrowserService : IBrowserService
                 }
 
                 var page = await _contextChromium!.NewPageAsync();
-                _pages[site] = page;
+                _pages[pageKey] = page;
                 return page;
             }
         }
@@ -178,9 +180,9 @@ public class BrowserService : IBrowserService
         }
     }
 
-    public async Task ClosePageAsync(Site site)
+    public async Task ClosePageAsync(Site site, string trackerKey)
     {
-        if (_pages.TryRemove(site, out var page))
+        if (_pages.TryRemove((site, trackerKey), out var page))
         {
             try { await page.CloseAsync(); } catch { }
         }

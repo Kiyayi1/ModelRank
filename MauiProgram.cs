@@ -25,7 +25,7 @@ namespace ModelRank
             builder.Services.AddMauiBlazorWebView();
             // Register the scraping service as scoped (or singleton)
             builder.Services.AddSingleton<IBrowserService, BrowserService>();
-            builder.Services.AddSingleton<ChaturbateScraper>();
+            builder.Services.AddSingleton<ChaturbateApiScraper>();
             builder.Services.AddSingleton<CamsodaScraper>();
             builder.Services.AddSingleton<Cam4Scraper>();
             builder.Services.AddSingleton<ISiteScraperFactory, SiteScraperFactory>();
@@ -34,6 +34,7 @@ namespace ModelRank
             // Then register the interface to return the same instance
             builder.Services.AddSingleton<IMonitoringService>(sp => sp.GetRequiredService<MonitoringService>());
             builder.Services.AddSingleton<IStorageService, JsonStorageService>();
+            builder.Services.AddSingleton<IWarehouseService, SqliteWarehouseService>();
 
 #if DEBUG
             builder.Services.AddBlazorWebViewDeveloperTools();

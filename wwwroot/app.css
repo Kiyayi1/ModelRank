@@ -129,3 +129,10 @@ h1:focus {
     .table-sm th, .table-sm td {
         padding: 0.3rem;
     }
+
+.model-thumb {
+    height: 40px;
+    width: 60px;
+    object-fit: cover;
+    border-radius: 4px;
+}

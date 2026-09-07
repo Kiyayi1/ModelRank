@@ -1,4 +1,4 @@
-﻿@using ModelRank.Services
+@using ModelRank.Services
 @using ModelRank.Models
 @using System.Text.RegularExpressions
 @inject IMonitoringService MonitoringService
@@ -7,21 +7,20 @@
 @implements IDisposable
 
 <div class="site-tab">
-    <!-- Compact input row -->
+    <!-- Add-tracker row: starts a new, independent tracker for this site without touching any
+         tracker already running, so several people can be monitored at once. -->
     <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
         <div style="min-width:150px;">
             <label for="@($"modelName-{Site}")" class="form-label small">Model Name</label>
-            <InputText @bind-Value="localModelName" id="@($"modelName-{Site}")" class="form-control form-control-sm"
-                       @onkeypress="OnEnterKey"
-                       disabled="@(state?.IsMonitoring == true)" />
+            <InputText @bind-Value="newModelName" id="@($"modelName-{Site}")" class="form-control form-control-sm"
+                       @onkeypress="OnEnterKey" />
         </div>
         <div style="min-width:80px;">
             <label for="@($"interval-{Site}")" class="form-label small">Interval (min)</label>
-            <InputNumber @bind-Value="localIntervalMinutes" id="@($"interval-{Site}")" class="form-control form-control-sm" min="0.5" step="0.5" disabled="@(state?.IsMonitoring == true)" />
+            <InputNumber @bind-Value="newIntervalMinutes" id="@($"interval-{Site}")" class="form-control form-control-sm" min="0.5" step="0.5" />
         </div>
         <div class="d-flex gap-1">
-            <button class="btn btn-primary btn-sm" @onclick="StartMonitoring" disabled="@(state?.IsMonitoring == true)">Start</button>
-            <button class="btn btn-danger btn-sm" @onclick="StopMonitoring" disabled="@(state?.IsMonitoring != true)">Stop</button>
+            <button class="btn btn-primary btn-sm" @onclick="StartNewTracker">Start Tracking</button>
             <button class="btn btn-info btn-sm" @onclick="ToggleFilterPanel">Filters</button>
         </div>
     </div>
@@ -63,81 +62,6 @@
         </div>
     }
 
-    <!-- Status message -->
-    @if (!string.IsNullOrEmpty(state?.StatusMessage))
-    {
-        <div class="alert alert-info mt-2 status-area">
-            <pre class="status-text">@state.StatusMessage</pre>
-        </div>
-    }
-
-    <!-- Live monitoring results table -->
-    @if (!isViewingFiltered && state?.Results.Any() == true)
-    {
-        <h4 class="mt-4">
-            @{
-                var latestResult = state.Results.LastOrDefault();
-                string displayName;
-                if (latestResult != null && !string.IsNullOrEmpty(latestResult.DisplayName) && !string.Equals(latestResult.ModelName, latestResult.DisplayName, StringComparison.OrdinalIgnoreCase))
-                {
-                    displayName = latestResult.DisplayName;
-                }
-                else
-                {
-                    displayName = FormatDisplayName(state.ModelName);
-                }
-
-                if (!string.IsNullOrEmpty(displayName) && !string.Equals(state.ModelName, displayName, StringComparison.OrdinalIgnoreCase))
-                {
-                    <span>Live Monitoring: @state.ModelName (@displayName)</span>
-                }
-                else
-                {
-                    <span>Live Monitoring: @state.ModelName</span>
-                }
-            }
-        </h4>
-        <table class="table table-sm table-striped">
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Page</th>
-                    <th>Position</th>
-                    <th>Rank</th>
-                    <th>Viewers</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var item in state.Results.OrderByDescending(r => r.Timestamp))
-                {
-                    <tr>
-                        <td>@FormatTimestamp(item.Timestamp)</td>
-                        <td>@item.Page</td>
-                        <td>@item.Position</td>
-                        <td>
-                            @item.Rank
-                            @if (item.RankChange.HasValue && item.RankChange != 0)
-                            {
-                                <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
-                                    @(item.RankChange > 0 ? "▲" : "▼")
-                                </span>
-                            }
-                        </td>
-                        <td>
-                            @item.Viewers
-                            @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
-                            {
-                                <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
-                                    @(item.ViewersChange > 0 ? "▲" : "▼")
-                                </span>
-                            }
-                        </td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-    }
-
     <!-- Filtered results table (with delete buttons) -->
     @if (isViewingFiltered && filteredResults.Any())
     {
@@ -157,11 +81,16 @@
         <table class="table table-sm table-striped">
             <thead>
                 <tr>
+                    <th>Img</th>
                     <th>Time</th>
                     <th>Page</th>
                     <th>Position</th>
                     <th>Rank</th>
                     <th>Viewers</th>
+                    <th>Followers</th>
+                    <th>Tags</th>
+                    <th>Goal Left</th>
+                    <th>Tipped (period)</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -169,6 +98,12 @@
                 @foreach (var item in filteredResults.OrderByDescending(r => r.Timestamp))
                 {
                     <tr>
+                        <td>
+                            @if (!string.IsNullOrEmpty(item.ImageUrl))
+                            {
+                                <img src="@item.ImageUrl" alt="@item.ModelName" class="model-thumb" />
+                            }
+                        </td>
                         <td>@FormatFullTimestamp(item.Timestamp)</td>
                         <td>@item.Page</td>
                         <td>@item.Position</td>
@@ -190,6 +125,24 @@
                                 </span>
                             }
                         </td>
+                        <td>@item.Followers</td>
+                        <td>
+                            @foreach (var tag in item.Tags)
+                            {
+                                <span class="badge bg-secondary me-1">@tag</span>
+                            }
+                        </td>
+                        <td>@(item.TokensRemaining?.ToString() ?? "-")</td>
+                        <td>
+                            @if (item.TokensTippedThisPeriod.HasValue)
+                            {
+                                <span class="@(item.TokensTippedThisPeriod > 0 ? "text-success" : "")">@item.TokensTippedThisPeriod</span>
+                            }
+                            else
+                            {
+                                @:-
+                            }
+                        </td>
                         <td>
                             <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteResult(item.Id)" title="Delete this entry">🗑️</button>
                         </td>
@@ -198,14 +151,111 @@
             </tbody>
         </table>
     }
+
+    <!-- One card per active/recent tracker on this site -- these all run concurrently. -->
+    @foreach (var tracker in trackers)
+    {
+        <div class="card mb-3">
+            <div class="card-header d-flex flex-wrap align-items-center gap-2">
+                <strong>@tracker.ModelName</strong>
+                <span class="badge @(tracker.IsMonitoring ? "bg-success" : "bg-secondary")">
+                    @(tracker.IsMonitoring ? "Monitoring" : "Stopped")
+                </span>
+                <div class="ms-auto d-flex gap-1">
+                    <button class="btn btn-danger btn-sm" @onclick="() => StopTracker(tracker.ModelName)" disabled="@(!tracker.IsMonitoring)">Stop</button>
+                    <button class="btn btn-outline-secondary btn-sm" @onclick="() => RemoveTracker(tracker.ModelName)" disabled="@tracker.IsMonitoring" title="Remove this tracker from the list">Remove</button>
+                </div>
+            </div>
+            <div class="card-body">
+                @if (!string.IsNullOrEmpty(tracker.StatusMessage))
+                {
+                    <div class="alert alert-info status-area">
+                        <pre class="status-text">@tracker.StatusMessage</pre>
+                    </div>
+                }
+
+                @if (tracker.Results.Any())
+                {
+                    <table class="table table-sm table-striped">
+                        <thead>
+                            <tr>
+                                <th>Img</th>
+                                <th>Time</th>
+                                <th>Page</th>
+                                <th>Position</th>
+                                <th>Rank</th>
+                                <th>Viewers</th>
+                                <th>Followers</th>
+                                <th>Tags</th>
+                                <th>Goal Left</th>
+                                <th>Tipped (period)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var item in tracker.Results.OrderByDescending(r => r.Timestamp))
+                            {
+                                <tr>
+                                    <td>
+                                        @if (!string.IsNullOrEmpty(item.ImageUrl))
+                                        {
+                                            <img src="@item.ImageUrl" alt="@item.ModelName" class="model-thumb" />
+                                        }
+                                    </td>
+                                    <td>@FormatTimestamp(item.Timestamp)</td>
+                                    <td>@item.Page</td>
+                                    <td>@item.Position</td>
+                                    <td>
+                                        @item.Rank
+                                        @if (item.RankChange.HasValue && item.RankChange != 0)
+                                        {
+                                            <span class="@(item.RankChange > 0 ? "text-success" : "text-danger") ms-2">
+                                                @(item.RankChange > 0 ? "▲" : "▼")
+                                            </span>
+                                        }
+                                    </td>
+                                    <td>
+                                        @item.Viewers
+                                        @if (item.ViewersChange.HasValue && item.ViewersChange != 0)
+                                        {
+                                            <span class="@(item.ViewersChange > 0 ? "text-success" : "text-danger") ms-2">
+                                                @(item.ViewersChange > 0 ? "▲" : "▼")
+                                            </span>
+                                        }
+                                    </td>
+                                    <td>@item.Followers</td>
+                                    <td>
+                                        @foreach (var tag in item.Tags)
+                                        {
+                                            <span class="badge bg-secondary me-1">@tag</span>
+                                        }
+                                    </td>
+                                    <td>@(item.TokensRemaining?.ToString() ?? "-")</td>
+                                    <td>
+                                        @if (item.TokensTippedThisPeriod.HasValue)
+                                        {
+                                            <span class="@(item.TokensTippedThisPeriod > 0 ? "text-success" : "")">@item.TokensTippedThisPeriod</span>
+                                        }
+                                        else
+                                        {
+                                            @:-
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+            </div>
+        </div>
+    }
 </div>
 
 @code {
     [Parameter] public Site Site { get; set; }
 
-    private string localModelName = "";
-    private double localIntervalMinutes = 5;
-    private SiteMonitorState? state;
+    private string newModelName = "";
+    private double newIntervalMinutes = 5;
+    private List<SiteMonitorState> trackers = new();
 
     // Filter panel
     private bool showFilterPanel = false;
@@ -215,8 +265,6 @@
     private DateTime filterEnd = DateTime.Today.AddDays(1).AddSeconds(-1);
     private List<SearchResult> filteredResults = new();
     private bool isViewingFiltered = false;
-
-    private List<SearchResult> displayResults => isViewingFiltered ? filteredResults : (state?.Results ?? new());
 
     // ----------------------------------------------------------------------
     // Timestamp formatting with UTC offset
@@ -243,17 +291,20 @@
     protected override void OnInitialized()
     {
         base.OnInitialized();
-        state = MonitoringService.GetState(Site);
-        if (state.IntervalMinutes == 0) state.IntervalMinutes = 5;
-        localModelName = state.ModelName;
-        localIntervalMinutes = state.IntervalMinutes;
+        RefreshTrackers();
         MonitoringService.StateChanged += OnStateChanged;
     }
 
-    private void OnStateChanged(Site changedSite)
+    private void RefreshTrackers()
+    {
+        trackers = MonitoringService.GetStates(Site).ToList();
+    }
+
+    private void OnStateChanged(Site changedSite, string modelKey)
     {
         if (changedSite == Site)
         {
+            RefreshTrackers();
             InvokeAsync(StateHasChanged);
         }
     }
@@ -380,27 +431,29 @@
     {
         if (e.Key == "Enter")
         {
-            await StartMonitoring();
+            await StartNewTracker();
         }
     }
 
-    private async Task StartMonitoring()
+    private async Task StartNewTracker()
     {
-        if (string.IsNullOrWhiteSpace(localModelName)) return;
-        if (localIntervalMinutes < 0.5) localIntervalMinutes = 0.5;
+        if (string.IsNullOrWhiteSpace(newModelName)) return;
+        if (newIntervalMinutes < 0.5) newIntervalMinutes = 0.5;
 
-        if (state?.IsMonitoring == true)
-        {
-            StopMonitoring();
-            await Task.Delay(500);
-        }
-
-        await MonitoringService.StartMonitoringAsync(Site, localModelName, localIntervalMinutes);
+        await MonitoringService.StartMonitoringAsync(Site, newModelName, newIntervalMinutes);
+        newModelName = "";
+        RefreshTrackers();
     }
 
-    private void StopMonitoring()
+    private void StopTracker(string modelName)
     {
-        MonitoringService.StopMonitoring(Site);
+        MonitoringService.StopMonitoring(Site, modelName);
+    }
+
+    private void RemoveTracker(string modelName)
+    {
+        MonitoringService.RemoveTracker(Site, modelName);
+        RefreshTrackers();
     }
 
     // ----------------------------------------------------------------------
